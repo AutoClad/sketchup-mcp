@@ -37,9 +37,44 @@ We're using uv so you'll need to ```brew install uv```
 
 ### Starting the Connection
 
-1. In Sketchup, go to Extensions > SketchupMCP > Start Server
-2. The server will start on the default port (9876)
-3. Make sure the MCP server is running in your terminal
+1. Start Sketchup. The extension starts its server automatically on the
+   default port (9876); check the Ruby Console for "Server started and
+   listening". If it failed (for example, the port was in use), use
+   Extensions > MCP Server > Start Server to retry.
+2. Make sure the MCP server is running in your terminal
+
+### Connecting across a VM
+
+The extension listens on `127.0.0.1:9876` by default, and the MCP server
+connects to `localhost:9876`. If SketchUp runs in a VM and Claude runs on the
+host, loopback will not work in either direction:
+
+1. In the guest, set `SKETCHUP_MCP_BIND` to `0.0.0.0` (for example
+   `setx SKETCHUP_MCP_BIND 0.0.0.0`, then restart SketchUp) so the incoming
+   connection can arrive at all.
+2. On the host, set `SKETCHUP_MCP_HOST` in the Claude config's `env` to the
+   guest's address - `localhost` with VirtualBox NAT port forwarding, or the
+   guest IP on a host-only or bridged network. `SKETCHUP_MCP_PORT` moves the
+   port, and has to be set on both sides.
+
+There is no authentication on that port and no approval prompt before
+`eval_ruby` runs, so binding to `0.0.0.0` lets anything that can reach the
+guest run Ruby in SketchUp. Only do it when the VM is disposable and the
+network it sits on is one you trust.
+
+### When it stops answering
+
+Every request is logged to the Ruby Console as `Request #N started` and
+`Request #N finished` (or `failed`). If calls start timing out, the last
+`started` with no matching end is the one that never came back. **Extensions >
+MCP Server > Show Status** prints the connected clients, the requests still in
+flight, and when the server last serviced its sockets.
+
+A request that never returns no longer blocks the others, and a watchdog
+restarts the server's timer if it stops firing. `eval_ruby` gives up after 50
+seconds, so it answers before the MCP client's own timeout does.
+`SKETCHUP_MCP_EVAL_TIMEOUT` on the host changes that; keep it under the
+client's limit.
 
 ### Using with Claude
 
