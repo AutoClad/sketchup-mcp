@@ -7,11 +7,11 @@ This script tests Ruby code in smaller chunks to identify compatibility issues w
 
 import json
 import logging
+
 from mcp.client import Client
 
 # Configure logging
-logging.basicConfig(level=logging.INFO, 
-                   format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("RubyTester")
 
 # Test cases - each with a name and Ruby code to test
@@ -22,7 +22,7 @@ TEST_CASES = [
             model = Sketchup.active_model
             entities = model.active_entities
             "Success: Basic model access works"
-        """
+        """,
     },
     {
         "name": "Create Group",
@@ -31,7 +31,7 @@ TEST_CASES = [
             entities = model.active_entities
             group = entities.add_group
             group.entityID.to_s
-        """
+        """,
     },
     {
         "name": "Create Face and Pushpull",
@@ -47,7 +47,7 @@ TEST_CASES = [
             )
             face.pushpull(10)
             "Success: Created face and pushpull"
-        """
+        """,
     },
     {
         "name": "Component Definition",
@@ -55,7 +55,7 @@ TEST_CASES = [
             model = Sketchup.active_model
             definition = model.definitions.add("Test Component")
             definition.name
-        """
+        """,
     },
     {
         "name": "Component Behavior",
@@ -70,7 +70,7 @@ TEST_CASES = [
             
             # Return the available methods
             methods.sort.join(", ")
-        """
+        """,
     },
     {
         "name": "Component Instance",
@@ -91,16 +91,17 @@ TEST_CASES = [
             behavior.snapto = 0
             
             "Success: Component instance created with behavior set"
-        """
-    }
+        """,
+    },
 ]
+
 
 def test_ruby_code(client, test_case):
     """Test a single Ruby code snippet."""
     logger.info(f"Testing: {test_case['name']}")
-    
+
     response = client.eval_ruby(code=test_case["code"])
-    
+
     try:
         result = json.loads(response)
         if result.get("success"):
@@ -113,28 +114,30 @@ def test_ruby_code(client, test_case):
         logger.error(f"Failed to parse response: {response}")
         return False
 
+
 def main():
     """Main function to test Ruby code snippets."""
     # Connect to the MCP server
     client = Client("sketchup")
-    
+
     # Check if the connection is successful
     if not client.is_connected:
         logger.error("Failed to connect to the SketchUp MCP server.")
         return
-    
+
     logger.info("Connected to SketchUp MCP server.")
     logger.info("=" * 50)
-    
+
     # Run each test case
     success_count = 0
     for test_case in TEST_CASES:
         if test_ruby_code(client, test_case):
             success_count += 1
         logger.info("-" * 50)
-    
+
     # Summary
     logger.info(f"Testing complete: {success_count}/{len(TEST_CASES)} tests passed")
 
+
 if __name__ == "__main__":
-    main() 
+    main()

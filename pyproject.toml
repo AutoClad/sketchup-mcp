@@ -14,7 +14,7 @@ classifiers = [
     "Operating System :: OS Independent",
 ]
 dependencies = [
-    "mcp[cli]>=1.3.0"
+    "mcp[cli]>=1.3.0,<2"
 ]
 
 [project.urls]
@@ -26,6 +26,34 @@ sketchup-mcp = "sketchup_mcp.server:main"
 
 [project.entry-points.mcp]
 sketchup = "sketchup_mcp.server:mcp"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.8",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "."]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+# Defaults (pyflakes + pycodestyle errors) plus import sorting and a few
+# bug-catchers. The inherited upstream code is loose; tighten over time.
+select = ["E", "F", "I", "B", "UP"]
+ignore = [
+    "E722",  # bare except: used throughout upstream; fix as files are touched
+    "B904",  # raise without from inside except: same
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Scripts that need a live SketchUp; not part of the test suite.
+"examples/*" = ["E402"]
 
 [build-system]
 requires = ["setuptools>=61.0", "wheel"]

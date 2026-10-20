@@ -8,11 +8,11 @@ to execute Ruby code in SketchUp.
 
 import json
 import logging
+
 from mcp.client import Client
 
 # Configure logging
-logging.basicConfig(level=logging.INFO, 
-                   format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("SimpleRubyEvalExample")
 
 # Simple Ruby code examples
@@ -24,7 +24,7 @@ EXAMPLES = [
             entities = model.active_entities
             line = entities.add_line([0,0,0], [100,100,100])
             line.entityID
-        """
+        """,
     },
     {
         "name": "Create a cube",
@@ -40,7 +40,7 @@ EXAMPLES = [
             )
             face.pushpull(10)
             group.entityID
-        """
+        """,
     },
     {
         "name": "Get model information",
@@ -54,29 +54,30 @@ EXAMPLES = [
                 "selection_count": model.selection.size
             }
             info.to_json
-        """
-    }
+        """,
+    },
 ]
+
 
 def main():
     """Main function to demonstrate the eval_ruby feature."""
     # Connect to the MCP server
     client = Client("sketchup")
-    
+
     # Check if the connection is successful
     if not client.is_connected:
         logger.error("Failed to connect to the SketchUp MCP server.")
         return
-    
+
     logger.info("Connected to SketchUp MCP server.")
-    
+
     # Run each example
     for example in EXAMPLES:
         logger.info(f"Running example: {example['name']}")
-        
+
         # Evaluate the Ruby code
         response = client.eval_ruby(code=example["code"])
-        
+
         # Parse the response
         try:
             result = json.loads(response)
@@ -86,10 +87,11 @@ def main():
                 logger.error(f"Error: {result.get('error')}")
         except json.JSONDecodeError:
             logger.error(f"Failed to parse response: {response}")
-        
+
         logger.info("-" * 40)
-    
+
     logger.info("All examples completed.")
 
+
 if __name__ == "__main__":
-    main() 
+    main()

@@ -10,6 +10,7 @@ module SU_MCP
   class Server
     def initialize
       @port = 9876
+      @bind = '127.0.0.1'   # set to '0.0.0.0' to accept connections from other machines (e.g. host Mac -> VM)
       @server = nil
       @running = false
       @timer_id = nil
@@ -39,9 +40,9 @@ module SU_MCP
       return if @running
       
       begin
-        log "Starting server on localhost:#{@port}..."
+        log "Starting server on #{@bind}:#{@port}..."
         
-        @server = TCPServer.new('127.0.0.1', @port)
+        @server = TCPServer.new(@bind, @port)
         log "Server created on port #{@port}"
         
         @running = true

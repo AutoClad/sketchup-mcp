@@ -7,11 +7,11 @@ This script specifically tests the component behavior methods in SketchUp 25.0.5
 
 import json
 import logging
+
 from mcp.client import Client
 
 # Configure logging
-logging.basicConfig(level=logging.INFO, 
-                   format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("BehaviorTester")
 
 # Ruby code to test component behavior methods
@@ -89,34 +89,35 @@ model.commit_operation
 }.to_json
 """
 
+
 def main():
     """Main function to test component behavior methods."""
     # Connect to the MCP server
     client = Client("sketchup")
-    
+
     # Check if the connection is successful
     if not client.is_connected:
         logger.error("Failed to connect to the SketchUp MCP server.")
         return
-    
+
     logger.info("Connected to SketchUp MCP server.")
-    
+
     # Run the behavior test
     logger.info("Testing component behavior methods...")
     response = client.eval_ruby(code=BEHAVIOR_TEST_CODE)
-    
+
     # Parse the response
     try:
         result = json.loads(response)
         if result.get("success"):
             # Parse the JSON result
             behavior_data = json.loads(result.get("result"))
-            
+
             # Display all available methods
             logger.info("Available methods on Behavior object:")
             for method in behavior_data["all_methods"]:
                 logger.info(f"  - {method}")
-            
+
             # Display property test results
             logger.info("\nProperty test results:")
             for prop, prop_result in behavior_data["property_results"].items():
@@ -124,13 +125,13 @@ def main():
                     readable = prop_result.get("readable", False)
                     writable = prop_result.get("writable", False)
                     error = prop_result.get("error")
-                    
+
                     status = []
                     if readable:
                         status.append("readable")
                     if writable:
                         status.append("writable")
-                    
+
                     if error:
                         logger.info(f"  - {prop}: EXISTS but ERROR: {error}")
                     else:
@@ -141,8 +142,9 @@ def main():
             logger.error(f"Error: {result.get('error')}")
     except json.JSONDecodeError as e:
         logger.error(f"Failed to parse response: {e}")
-    
+
     logger.info("Testing completed.")
 
+
 if __name__ == "__main__":
-    main() 
+    main()
