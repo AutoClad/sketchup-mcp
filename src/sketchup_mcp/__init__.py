@@ -3,4 +3,6 @@
 __version__ = "0.1.17"
 
 # Expose key classes and functions for easier imports
-from .server import mcp 
+from .server import mcp
+
+__all__ = ["mcp"]

@@ -8,11 +8,11 @@ a complex arts and crafts style cabinet in SketchUp using Ruby code.
 
 import json
 import logging
+
 from mcp.client import Client
 
 # Configure logging
-logging.basicConfig(level=logging.INFO, 
-                   format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("ArtsAndCraftsCabinetExample")
 
 # Ruby code to create an arts and crafts cabinet
@@ -282,22 +282,23 @@ end
 create_arts_and_crafts_cabinet
 """
 
+
 def main():
     """Main function to create the arts and crafts cabinet in SketchUp."""
     # Connect to the MCP server
     client = Client("sketchup")
-    
+
     # Check if the connection is successful
     if not client.is_connected:
         logger.error("Failed to connect to the SketchUp MCP server.")
         return
-    
+
     logger.info("Connected to SketchUp MCP server.")
-    
+
     # Evaluate the Ruby code to create the cabinet
     logger.info("Creating arts and crafts cabinet...")
     response = client.eval_ruby(code=CABINET_RUBY_CODE)
-    
+
     # Parse the response
     try:
         result = json.loads(response)
@@ -307,8 +308,9 @@ def main():
             logger.error(f"Failed to create cabinet: {result.get('error')}")
     except json.JSONDecodeError:
         logger.error(f"Failed to parse response: {response}")
-    
+
     logger.info("Example completed.")
 
+
 if __name__ == "__main__":
-    main() 
+    main()
