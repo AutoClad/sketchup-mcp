@@ -70,8 +70,11 @@ Every request is logged to the Ruby Console as `Request #N started` and
 MCP Server > Show Status** prints the connected clients, the requests still in
 flight, and when the server last serviced its sockets.
 
-A request that never returns no longer blocks the others, and a watchdog
-restarts the server's timer if it stops firing. `eval_ruby` gives up after 50
+A request that never returns no longer silences the server: while one is
+running, other tool calls are answered at once with an error saying what's
+running, and not run, since running them inside the first request's
+operation crashed SketchUp. A watchdog restarts the server's timer if it
+stops firing while no request is running. `eval_ruby` gives up after 50
 seconds, so it answers before the MCP client's own timeout does.
 `SKETCHUP_MCP_EVAL_TIMEOUT` on the host changes that; keep it under the
 client's limit.

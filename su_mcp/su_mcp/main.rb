@@ -66,13 +66,15 @@ module SU_MCP
     MAX_REQUEST_BYTES = 8 * 1024 * 1024
 
     TICK_INTERVAL = 0.1
-    # The watchdog restarts the tick timer if it has been silent this long,
-    # and names any request that has been running longer than SLOW_REQUEST.
+    # The watchdog restarts the tick timer if it has been silent this long
+    # with no request running, and names any request that has been running
+    # longer than SLOW_REQUEST.
     WATCHDOG_INTERVAL = 5
     TICK_STALL        = 3
     SLOW_REQUEST      = 30
-    # Nested ticks are allowed so a suspended request cannot starve the
-    # others, but not without bound.
+    # Nested ticks are allowed so the server keeps answering while a request
+    # is suspended, but not without bound. They answer; they don't run
+    # tools (see refuse_while_busy).
     MAX_TICK_DEPTH = 4
     MAX_LOG_CHARS  = 500
 
@@ -134,7 +136,8 @@ module SU_MCP
       # that request is still on the stack. That used to be refused outright,
       # so a request that never came back out of its nested loop silenced
       # the server for good. Now the nested tick runs, and only the client
-      # whose request is suspended is left alone (see :busy).
+      # whose request is suspended is left alone (see :busy); other clients'
+      # tool calls are answered "busy" and not run (see refuse_while_busy).
       return if @tick_depth >= MAX_TICK_DEPTH
       @tick_depth += 1
       begin
@@ -156,14 +159,25 @@ module SU_MCP
       now = Time.now
 
       silent_for = now - @last_tick_at
-      if silent_for > TICK_STALL
-        # Both timers are serviced by the same event loop, so this one
-        # firing while tick has not means tick's timer is gone, not that the
-        # main thread is busy.
-        log "WATCHDOG: tick timer silent for #{silent_for.round(1)}s " \
-            "(depth #{@tick_depth}); restarting it."
-        log_in_flight
+      if silent_for > TICK_STALL && @tick_depth > 0
+        # A tick is still on the stack, running a request, so the timer
+        # isn't dead, only busy (SketchUp may not fire a timer again while
+        # its block is running). Stopping it here would stop the timer whose
+        # block is running, from inside whatever nested event loop let this
+        # one fire: never do that.
+        unless @busy_logged
+          @busy_logged = true
+          log "WATCHDOG: no new tick for #{silent_for.round(1)}s, but a " \
+              "request is still running (depth #{@tick_depth}); leaving the timer alone."
+          log_in_flight
+        end
+      elsif silent_for > TICK_STALL
+        # No tick is running, and this timer has fired while tick's has
+        # not, so tick's timer is gone.
+        log "WATCHDOG: tick timer silent for #{silent_for.round(1)}s; restarting it."
         start_tick_timer
+      else
+        @busy_logged = false
       end
 
       @in_flight.each_value do |req|
@@ -282,7 +296,9 @@ module SU_MCP
         request, consumed = take_json_prefix(client[:buffer])
         break if consumed == 0
         client[:buffer] = client[:buffer].byteslice(consumed..-1) || String.new
-        if request
+        if request && !@in_flight.empty? && runs_code?(request)
+          refuse_while_busy(sock, request)
+        elsif request
           client[:busy] = true
           begin
             handle_and_respond(client, request)
@@ -296,6 +312,31 @@ module SU_MCP
           send_error(sock, nil, -32700, "Parse error")
         end
       end
+    end
+
+    # Whether a request runs a tool, which can run Ruby and change the
+    # model, rather than only listing what's there.
+    def runs_code?(request)
+      request.is_a?(Hash) && (request["command"] || request["method"] == "tools/call") ? true : false
+    end
+
+    # A tool call that arrives while another request is still running has
+    # reached us through a nested tick: the running request is inside one of
+    # SketchUp's nested event loops (commit_operation, view.refresh,
+    # write_image, a dialog), and running another request there runs it in
+    # the middle of that request's operation. A test run started that way
+    # crashed SketchUp with heap corruption, and nested event loops have to
+    # unwind in order, so a request that entered one of its own could keep
+    # the one below it from ever returning. So it is answered at once, with
+    # what is running, and not run: the server stays responsive, which is
+    # what nested ticks are for, without running code inside another
+    # request.
+    def refuse_while_busy(sock, request)
+      running = @in_flight.values.map { |r| "##{r[:no]} #{r[:label]} for #{(Time.now - r[:started]).round}s" }.join("; ")
+      log "Refused #{request_label(request)}: busy with #{running}"
+      send_error(sock, request["id"], -32000,
+                 "SketchUp is busy with another request, so this one was not run: #{running}. " \
+                 "If that request never finishes, it is stuck in a nested event loop and SketchUp needs restarting.")
     end
 
     # Pull one complete JSON object off the front of +buffer+, returning
