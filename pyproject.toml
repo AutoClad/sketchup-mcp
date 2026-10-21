@@ -1,6 +1,6 @@
 [project]
 name = "sketchup-mcp"
-version = "0.1.17"
+version = "0.1.18"
 description = "Sketchup integration through Model Context Protocol"
 readme = "README.md"
 requires-python = ">=3.10"
