@@ -73,7 +73,7 @@ flight, and when the server last serviced its sockets.
 A request that never returns no longer silences the server: while one is
 running, other tool calls are answered at once with an error saying what's
 running, and not run, since running them inside the first request's
-operation crashed SketchUp. A watchdog restarts the server's timer if it
+operation crashed SketchUp. `server_status` is the exception: it runs no code in the model, and says what is running and where, so a request that never comes back can still be looked into. A watchdog restarts the server's timer if it
 stops firing while no request is running. `eval_ruby` gives up after 50
 seconds, so it answers before the MCP client's own timeout does.
 `SKETCHUP_MCP_EVAL_TIMEOUT` on the host changes that; keep it under the
@@ -108,6 +108,7 @@ Once connected, Claude can interact with Sketchup using the following capabiliti
 * `set_material` - Apply materials to components
 * `export_scene` - Export the current scene to various formats
 * `eval_ruby` - Execute arbitrary Ruby code in SketchUp for advanced operations
+* `server_status` - What the SketchUp side is doing: the requests in flight, and the Ruby call stack of one that hasn't come back. Answered even while another request is running
 
 ### Example Commands
 

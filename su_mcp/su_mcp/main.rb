@@ -193,16 +193,29 @@ module SU_MCP
     end
 
     def status
+      status_lines.each { |l| log "STATUS: #{l}" }
+    end
+
+    # What the server is doing, for Show Status and the server_status tool.
+    # With stack, also the Ruby call stack this is answered from: answered
+    # in a nested tick, that is the suspended request's own frames, so it
+    # says where a request that hasn't come back is (as Ruby sees it).
+    def status_lines(stack: false)
       lines = []
       lines << "running: #{@running}, listening on #{BIND_ADDRESS}:#{@port}"
       lines << "last tick: #{(Time.now - @last_tick_at).round(1)}s ago, depth #{@tick_depth}"
       lines << "clients: " + (@clients.empty? ? "none" : @clients.map { |c|
         "##{c[:id]}#{c[:busy] ? ' (busy)' : ''}"
       }.join(", "))
-      lines << "in flight: " + (@in_flight.empty? ? "none" : @in_flight.values.map { |r|
-        "##{r[:no]} #{r[:label]} for #{(Time.now - r[:started]).round(1)}s"
-      }.join("; "))
-      lines.each { |l| log "STATUS: #{l}" }
+      lines << "in flight: " + (running_requests.then { |running|
+        running.empty? ? "none" : running.map { |r| "##{r[:no]} #{r[:label]} for #{(Time.now - r[:started]).round(1)}s" }.join("; ")
+      })
+      if stack
+        frames = caller.reject { |frame| frame.include?(__FILE__) }
+        lines << "Ruby stack, innermost first (#{frames.size} frames outside this server):"
+        lines.concat(frames.first(40).map { |frame| "  #{frame}" })
+      end
+      lines
     end
 
     def accept_new_connections
@@ -296,7 +309,7 @@ module SU_MCP
         request, consumed = take_json_prefix(client[:buffer])
         break if consumed == 0
         client[:buffer] = client[:buffer].byteslice(consumed..-1) || String.new
-        if request && !@in_flight.empty? && runs_code?(request)
+        if request && !running_requests.empty? && runs_code?(request)
           refuse_while_busy(sock, request)
         elsif request
           client[:busy] = true
@@ -315,9 +328,22 @@ module SU_MCP
     end
 
     # Whether a request runs a tool, which can run Ruby and change the
-    # model, rather than only listing what's there.
+    # model, rather than only listing what's there. server_status runs none,
+    # so it's answered even while another request is running.
     def runs_code?(request)
-      request.is_a?(Hash) && (request["command"] || request["method"] == "tools/call") ? true : false
+      return false unless request.is_a?(Hash)
+      return false if status_request?(request)
+
+      request["command"] || request["method"] == "tools/call" ? true : false
+    end
+
+    # The requests in flight other than server_status ones.
+    def running_requests
+      @in_flight.values.reject { |r| r[:status] }
+    end
+
+    def status_request?(request)
+      request["method"] == "tools/call" && request["params"].is_a?(Hash) && request["params"]["name"] == "server_status"
     end
 
     # A tool call that arrives while another request is still running has
@@ -332,7 +358,7 @@ module SU_MCP
     # what nested ticks are for, without running code inside another
     # request.
     def refuse_while_busy(sock, request)
-      running = @in_flight.values.map { |r| "##{r[:no]} #{r[:label]} for #{(Time.now - r[:started]).round}s" }.join("; ")
+      running = running_requests.map { |r| "##{r[:no]} #{r[:label]} for #{(Time.now - r[:started]).round}s" }.join("; ")
       log "Refused #{request_label(request)}: busy with #{running}"
       send_error(sock, request["id"], -32000,
                  "SketchUp is busy with another request, so this one was not run: #{running}. " \
@@ -406,7 +432,8 @@ module SU_MCP
       @next_request_no += 1
       label = request_label(request)
       started = Time.now
-      @in_flight[no] = { :no => no, :label => label, :started => started, :warned => false }
+      @in_flight[no] = { :no => no, :label => label, :started => started, :warned => false,
+                         :status => request.is_a?(Hash) && status_request?(request) }
       log "Request ##{no} started (client ##{client[:id]}, id #{request_id.inspect}): #{label}"
 
       begin
@@ -581,6 +608,9 @@ module SU_MCP
           create_finger_joint(args)
         when "eval_ruby"
           eval_ruby(args)
+        when "server_status"
+          { success: true, result: status_lines(stack: true).join("
+") }
         else
           raise "Unknown tool: #{tool_name}"
         end

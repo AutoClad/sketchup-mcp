@@ -33,7 +33,7 @@ SKETCHUP_PORT = int(os.environ.get("SKETCHUP_MCP_PORT", "9876"))
 EVAL_TIMEOUT = float(os.environ.get("SKETCHUP_MCP_EVAL_TIMEOUT", "50"))
 
 # Define version directly to avoid pkg_resources dependency
-__version__ = "0.1.17"
+__version__ = "0.1.18"
 logger.info(f"SketchupMCP Server version {__version__} starting up")
 
 class SketchupRubyError(Exception):
@@ -687,6 +687,29 @@ def eval_ruby(
             "success": False,
             "error": str(e)
         })
+
+@mcp.tool()
+def server_status(ctx: Context) -> str:
+    """Say what the SketchUp side of the server is doing: the requests in
+    flight and for how long, and the Ruby call stack, which shows where a
+    request that hasn't come back is. Runs no code in the model, so it's
+    answered even while another request is running (other tool calls then
+    get a 'busy' error)."""
+    try:
+        sketchup = get_sketchup_connection()
+        result = sketchup.send_command(
+            method="tools/call",
+            params={"name": "server_status", "arguments": {}},
+            request_id=ctx.request_id,
+            timeout=10.0,
+            retries=0
+        )
+        content = result.get("content") if isinstance(result, dict) else None
+        text = content[0].get("text") if isinstance(content, list) and content else json.dumps(result)
+        return json.dumps({"success": True, "result": text})
+    except Exception as e:
+        logger.error(f"Error in server_status: {str(e)}")
+        return json.dumps({"success": False, "error": str(e)})
 
 def main():
     mcp.run()
