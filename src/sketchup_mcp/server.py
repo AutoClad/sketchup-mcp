@@ -4,23 +4,17 @@ import json
 import asyncio
 import logging
 import os
-from dataclasses import dataclass
+import threading
+from dataclasses import dataclass, field
 from contextlib import asynccontextmanager
 from typing import AsyncIterator, Dict, Any, List
+
+from . import launcher
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, 
                    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("SketchupMCPServer")
-
-# Where the SketchUp extension is listening.
-#
-# Defaults to loopback, for SketchUp on this machine. If SketchUp runs in a VM,
-# point SKETCHUP_MCP_HOST at the guest (the forwarded address, or the guest IP
-# on a host-only/bridged network) and make sure the extension in the guest is
-# bound to something other than 127.0.0.1.
-SKETCHUP_HOST = os.environ.get("SKETCHUP_MCP_HOST", "localhost")
-SKETCHUP_PORT = int(os.environ.get("SKETCHUP_MCP_PORT", "9876"))
 
 # How long eval_ruby waits for SketchUp before giving up.
 #
@@ -53,6 +47,9 @@ class SketchupConnection:
     # Belongs to this socket and only this socket, so it is cleared whenever
     # the socket is.
     buffer: bytes = b""
+    # One request at a time on this socket. Tools run in threads (see
+    # eval_ruby), so two calls to one instance would otherwise interleave.
+    lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def connect(self) -> bool:
         """Connect to the Sketchup extension socket server
@@ -206,9 +203,17 @@ class SketchupConnection:
         is not safe to repeat, so it needs a long timeout and no automatic
         retry (a retry after a timeout runs the same code a second time).
         """
+        with self.lock:
+            return self._send_command(method, params, request_id, timeout, retries)
+
+    def _send_command(self, method, params, request_id, timeout, retries):
         # Try to connect if not connected
         if not self.connect():
-            raise ConnectionError("Not connected to Sketchup")
+            raise ConnectionError(
+                f"Could not connect to Sketchup at {self.host}:{self.port}. "
+                "Its SketchUp may still be loading, or stopped at a dialog; if it "
+                "has died, the next call leases again."
+            )
         
         # Ensure we're sending a proper JSON-RPC request
         if method == "tools/call" and params and "name" in params and "arguments" in params:
@@ -304,61 +309,108 @@ class SketchupConnection:
                 self.disconnect()
                 raise Exception(f"Communication error with Sketchup: {str(e)}")
 
-# Global connection management
-_sketchup_connection = None
+# One connection per SketchUp, by (host, port). A session has one lease at a
+# time, but keeps the connection to an instance it leased before.
+_connections: Dict[tuple, SketchupConnection] = {}
+_connections_lock = threading.Lock()
+_holder = None
 
-def get_sketchup_connection():
-    """Get or create a persistent Sketchup connection"""
-    global _sketchup_connection
-    
-    # No health check here. The ping this used to send was never read back,
-    # so its reply would sit in the stream ahead of the next real response -
-    # and a send on a socket whose peer has already gone succeeds locally
-    # anyway, so it never detected the thing it was meant to detect. A dead
-    # socket now surfaces as a failed send or read in send_command, which
-    # disconnects; the next call through here reconnects.
-    if _sketchup_connection is None:
-        _sketchup_connection = SketchupConnection(host=SKETCHUP_HOST, port=SKETCHUP_PORT)
+def session_holder():
+    """This MCP server's process, which its lease belongs to (see launcher)."""
+    global _holder
+    if _holder is None:
+        _holder = launcher.holder()
+    return _holder
 
-    # connect() is a no-op when the socket is already open, and reconnects
-    # when a previous call found it dead and dropped it.
-    if not _sketchup_connection.connect():
-        logger.error("Failed to connect to Sketchup")
-        _sketchup_connection = None
+def session_identity():
+    """(id, link) of the Claude desktop app's session that started this
+    server, or (None, None). Read from CLAUDE_CODE_HOST_SESSION_ID, which
+    Claude Code sets for what it starts in the desktop app; the link is the
+    form the app gives its sessions (claude://claude.ai/epitaxy/<id>). Both
+    observed in Claude 3.1623 (2026-10-22), not documented."""
+    session = os.environ.get("CLAUDE_CODE_HOST_SESSION_ID") or None
+    link = f"claude://claude.ai/epitaxy/{session}" if session else None
+    return session, link
+
+def resolve_instance():
+    """Where this session's tool calls go: its leased SketchUp's (host, port).
+
+    There's no default: with no lease, the call fails and says to lease. If
+    the leased SketchUp has died, leases again and raises, so nothing is run
+    on a model the caller didn't expect.
+    """
+    record = launcher.held(session_holder())
+    if record is None:
         raise Exception(
-            f"Could not connect to Sketchup at {SKETCHUP_HOST}:{SKETCHUP_PORT}. "
-            "Make sure the Sketchup extension is running (it starts with "
-            "Sketchup; Extensions > MCP Server > Start Server to retry), and "
-            "if Sketchup is in a VM, that SKETCHUP_MCP_HOST points at it and "
-            "the extension is bound to a non-loopback address."
+            "No SketchUp leased. Call lease_sketchup first (with src = your working folder), "
+            "and release_sketchup when your task is done."
         )
+    if not record["alive"]:
+        src = (record["env"] or {}).get("SHELLIFY_SRC")
+        lease = record["lease"] or {}
+        try:
+            new = launcher.lease(src, session_holder(), label=lease.get("label"),
+                                 session=lease.get("session"), link=lease.get("link"))
+        except Exception as e:
+            raise Exception(
+                f"{record['name']}'s SketchUp had died, so nothing was run, and leasing "
+                f"again failed: {e}"
+            )
+        raise Exception(
+            f"{record['name']}'s SketchUp had died, so nothing was run, and what was built "
+            f"or loaded in it is gone. Instead: {new['message']} Resend once it's set up again."
+        )
+    return launcher.HOST, record["port"]
 
-    return _sketchup_connection
+def get_sketchup_connection() -> SketchupConnection:
+    """The connection to this session's leased SketchUp (see resolve_instance)
+
+    No health check here. The ping this used to send was never read back,
+    so its reply would sit in the stream ahead of the next real response -
+    and a send on a socket whose peer has already gone succeeds locally
+    anyway, so it never detected the thing it was meant to detect. A dead
+    socket now surfaces as a failed send or read in send_command, which
+    disconnects; its next call reconnects. Connecting happens there too,
+    under the connection's lock, since a request may be running on it in
+    another thread.
+    """
+    key = resolve_instance()
+    with _connections_lock:
+        if key not in _connections:
+            _connections[key] = SketchupConnection(host=key[0], port=key[1])
+        return _connections[key]
 
 @asynccontextmanager
 async def server_lifespan(server: FastMCP) -> AsyncIterator[Dict[str, Any]]:
     """Manage server startup and shutdown lifecycle"""
     try:
         logger.info("SketchupMCP server starting up")
-        try:
-            sketchup = get_sketchup_connection()
-            logger.info("Successfully connected to Sketchup on startup")
-        except Exception as e:
-            logger.warning(f"Could not connect to Sketchup on startup: {str(e)}")
-            logger.warning("Make sure the Sketchup extension is running")
         yield {}
     finally:
-        global _sketchup_connection
-        if _sketchup_connection:
-            logger.info("Disconnecting from Sketchup")
-            _sketchup_connection.disconnect()
-            _sketchup_connection = None
+        for connection in list(_connections.values()):
+            connection.disconnect()
+        _connections.clear()
+        try:
+            # They'd be freed anyway once this process has gone.
+            launcher.release(session_holder())
+        except Exception as e:
+            logger.warning(f"Could not release this session's lease: {e}")
         logger.info("SketchupMCP server shut down")
 
 # Create MCP server with lifespan support
 mcp = FastMCP(
     "SketchupMCP",
-    instructions="Sketchup integration through the Model Context Protocol",
+    instructions=(
+        "SketchUp, driven through eval_ruby. Every session uses a SketchUp of its own from a "
+        "pool, one at a time: call lease_sketchup before any other tool, with src set to the "
+        "folder you work in (your worktree) and label set to your session's title or a few "
+        "words on your task. Tools fail until you have a lease; there is no default SketchUp. "
+        "While leased, the SketchUp shows a Claude badge, so the user knows not to touch it. "
+        "Call release_sketchup as soon as your task is done, before you end your turn, even if "
+        "the user may come back later: an idle lease keeps a SketchUp from everyone else. If "
+        "you come back to work after releasing, lease again; you may get another SketchUp, "
+        "or a fresh model, so check what you rely on."
+    ),
     lifespan=server_lifespan
 )
 
@@ -645,17 +697,12 @@ def create_finger_joint(
         logger.error(f"Error in create_finger_joint: {str(e)}")
         return f"Error creating finger joint: {str(e)}"
 
-@mcp.tool()
-def eval_ruby(
-    ctx: Context,
-    code: str
-) -> str:
-    """Evaluate arbitrary Ruby code in Sketchup"""
+def _eval_ruby(code: str, request_id) -> str:
     try:
         logger.info(f"eval_ruby called with code length: {len(code)}")
-        
+
         sketchup = get_sketchup_connection()
-        
+
         result = sketchup.send_command(
             method="tools/call",
             params={
@@ -664,7 +711,7 @@ def eval_ruby(
                     "code": code
                 }
             },
-            request_id=ctx.request_id,
+            request_id=request_id,
             # Ruby is not idempotent: a timeout does not mean it failed, so
             # retrying would run it again. Never retry, and see EVAL_TIMEOUT
             # for why the wait is bounded by the client's timeout.
@@ -689,26 +736,104 @@ def eval_ruby(
         })
 
 @mcp.tool()
-def server_status(ctx: Context) -> str:
-    """Say what the SketchUp side of the server is doing: the requests in
-    flight and for how long, and the Ruby call stack, which shows where a
-    request that hasn't come back is. Runs no code in the model, so it's
-    answered even while another request is running (other tool calls then
-    get a 'busy' error)."""
+async def eval_ruby(
+    ctx: Context,
+    code: str
+) -> str:
+    """Evaluate arbitrary Ruby code in this session's leased SketchUp (see
+    lease_sketchup)."""
+    # In a thread, so the server keeps answering meanwhile, and server_status
+    # still gets through.
+    return await asyncio.to_thread(_eval_ruby, code, ctx.request_id)
+
+def _server_status(request_id) -> str:
     try:
-        sketchup = get_sketchup_connection()
-        result = sketchup.send_command(
-            method="tools/call",
-            params={"name": "server_status", "arguments": {}},
-            request_id=ctx.request_id,
-            timeout=10.0,
-            retries=0
-        )
+        host, port = resolve_instance()
+        # A connection of its own, so it isn't queued behind a request
+        # running on the instance's usual one.
+        sketchup = SketchupConnection(host=host, port=port)
+        try:
+            result = sketchup.send_command(
+                method="tools/call",
+                params={"name": "server_status", "arguments": {}},
+                request_id=request_id,
+                timeout=10.0,
+                retries=0
+            )
+        finally:
+            sketchup.disconnect()
         content = result.get("content") if isinstance(result, dict) else None
         text = content[0].get("text") if isinstance(content, list) and content else json.dumps(result)
         return json.dumps({"success": True, "result": text})
     except Exception as e:
         logger.error(f"Error in server_status: {str(e)}")
+        return json.dumps({"success": False, "error": str(e)})
+
+@mcp.tool()
+async def server_status(ctx: Context) -> str:
+    """Say what the SketchUp side of the server is doing: the requests in
+    flight and for how long, and the Ruby call stack, which shows where a
+    request that hasn't come back is. Runs no code in the model, so it's
+    answered even while another request is running (other tool calls then
+    get a 'busy' error)."""
+    return await asyncio.to_thread(_server_status, ctx.request_id)
+
+def _lease_reply(record: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "success": True,
+        "name": record["name"],
+        "port": record["port"],
+        "pid": record["pid"],
+        "model": record["model"],
+        "src": (record["env"] or {}).get("SHELLIFY_SRC"),
+        "fresh": record["fresh"],
+        "message": record["message"],
+    }
+
+@mcp.tool()
+async def lease_sketchup(
+    ctx: Context,
+    src: str = None,
+    label: str = None
+) -> str:
+    """Lease a SketchUp of this session's own from the pool. Call it before
+    any other SketchUp tool: with no lease they fail. A session holds one
+    SketchUp at a time; leasing again returns the same one.
+
+    *src* is the Shellify source folder SketchUp loads (the folder you work
+    in, your worktree); default SHELLIFY_SRC. *label* is shown in the
+    SketchUp's viewport badge: your session's title, or a few words on your
+    task. A free instance already running on *src* is preferred; otherwise
+    one is started, or restarted, on a fresh copy of the template model,
+    which can take a minute. The reply's "fresh" says which: a reused
+    instance's model is as its last holder left it.
+
+    Release it with release_sketchup as soon as your task is done. If the
+    leased SketchUp dies, the next call leases again and says so."""
+    try:
+        session, link = session_identity()
+        record = await asyncio.to_thread(
+            launcher.lease, src, session_holder(), label, session, link)
+        return json.dumps(_lease_reply(record))
+    except Exception as e:
+        logger.error(f"Error in lease_sketchup: {str(e)}")
+        return json.dumps({"success": False, "error": str(e)})
+
+@mcp.tool()
+async def release_sketchup(ctx: Context) -> str:
+    """Release this session's SketchUp, as soon as your task is done, even if
+    the user may come back later. SketchUp keeps running, for the next
+    lease; lease again to go on working."""
+    try:
+        record = await asyncio.to_thread(launcher.release, session_holder())
+        if record is None:
+            return json.dumps({"success": False, "error": "This session holds no lease"})
+        return json.dumps({
+            "success": True,
+            "message": f"Released {record['name']} (port {record['port']}); it keeps running.",
+        })
+    except Exception as e:
+        logger.error(f"Error in release_sketchup: {str(e)}")
         return json.dumps({"success": False, "error": str(e)})
 
 def main():

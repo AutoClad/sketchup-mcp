@@ -14,7 +14,7 @@ classifiers = [
     "Operating System :: OS Independent",
 ]
 dependencies = [
-    "mcp[cli]>=1.3.0"
+    "mcp[cli]>=1.3.0,<2"
 ]
 
 [project.urls]
@@ -23,6 +23,7 @@ Issues = "https://github.com/yourusername/sketchup-mcp/issues"
 
 [project.scripts]
 sketchup-mcp = "sketchup_mcp.server:main"
+sketchup-launcher = "sketchup_mcp.launcher:main"
 
 [project.entry-points.mcp]
 sketchup = "sketchup_mcp.server:mcp"

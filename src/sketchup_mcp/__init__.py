@@ -2,5 +2,12 @@
 
 __version__ = "0.1.18"
 
-# Expose key classes and functions for easier imports
-from .server import mcp 
+
+def __getattr__(name):
+    # Expose the server lazily, so importing sketchup_mcp.launcher (the
+    # sketchup-launcher CLI, and the pool's scheduled tasks) doesn't start
+    # the server's logging.
+    if name == "mcp":
+        from .server import mcp
+        return mcp
+    raise AttributeError(name)

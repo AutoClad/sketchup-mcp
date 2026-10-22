@@ -2,6 +2,7 @@ require 'sketchup'
 require 'json'
 require 'socket'
 require 'fileutils'
+require_relative 'lease_badge'
 
 puts "MCP Extension loading..."
 SKETCHUP_CONSOLE.show rescue nil
@@ -2230,6 +2231,10 @@ module SU_MCP
     # menu trip before Claude can connect. start logs and cleans up on its own
     # if the port is taken, and Start Server from the menu still works after.
     @server.start
+
+    # While a pool instance is leased: Claude's icon in the viewport, and a
+    # toolbar button that opens the session.
+    LeaseBadge.start
 
     file_loaded(__FILE__)
   end
