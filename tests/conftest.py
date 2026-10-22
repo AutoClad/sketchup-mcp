@@ -50,10 +50,11 @@ def json_reply(obj):
 
 @pytest.fixture
 def make_connection():
-    """Build a SketchupConnection whose next socket is a FakeSocket with the given replies.
+    """Build a SketchupConnection whose sockets are FakeSockets.
 
-    Returns (conn, sock) for the common one-command case; conn.sockets lists
-    every socket the connection opened, in order.
+    Each positional argument is the reply script for one connection, in
+    order; the last repeats. refuse_first makes that many connects fail
+    first. conn.sockets lists every socket the connection opened.
     """
 
     def _make(replies=None, *more_replies, refuse_first=0):
@@ -68,14 +69,8 @@ def make_connection():
             opened.append(sock)
             return sock
 
-        conn = server.SketchupConnection(host="test-host", port=1, socket_factory=factory)
+        conn = server.SketchupConnection(host="test-host", port=1, socket_factory=factory, retry_delay=0)
         conn.sockets = opened
-        first = FakeSocket(scripts[0])  # placeholder until a command runs
-
-        class _Lazy:
-            def __getattr__(self, name):
-                return getattr(opened[refuse_first] if len(opened) > refuse_first else first, name)
-
-        return conn, _Lazy()
+        return conn
 
     return _make
