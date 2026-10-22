@@ -3,8 +3,10 @@
 Several Claude sessions on one machine can each drive a SketchUp of their
 own. The pool has a fixed set of instances, each on its own MCP port
 (SKETCHUP_MCP_PORT, which the extension reads) with its own copy of a
-template model and its own source folder (SHELLIFY_SRC, which Shellify's dev
-loader reads). A session leases one, its tool calls go to that port, and when
+template model and its own source folder: the src its lease names, which
+it passes to Shellify's dev loader as SHELLIFY_SRC. A lease must name src;
+there's no default, so a session never gets another folder's code by
+accident. A session leases one, its tool calls go to that port, and when
 it releases it the instance keeps running for the next one.
 
 There is no daemon. The state is a JSON file, guarded by a lock file, that
@@ -354,6 +356,23 @@ def normalize_src(src):
     return os.path.abspath(os.path.expanduser(src)).replace("\\", "/").rstrip("/")
 
 
+def check_src(src):
+    """src, normalized, if it's a Shellify source folder: one that exists and
+    has shellify.rb in it, as the dev loader needs. Refuses anything else at
+    once, so a typo or the wrong folder fails here rather than starting a
+    SketchUp that can't load Shellify."""
+    if not src or not str(src).strip():
+        raise PoolError(
+            "src is required: the folder you work in (your worktree, or ~/source/shellify "
+            "if you work in the main checkout)")
+    folder = normalize_src(str(src).strip())
+    if not os.path.isdir(folder):
+        raise PoolError(f"src isn't an existing folder: {folder}")
+    if not os.path.isfile(os.path.join(folder, "shellify.rb")):
+        raise PoolError(f"src has no shellify.rb, so it isn't a Shellify source folder: {folder}")
+    return folder
+
+
 def _same_src(a, b):
     if not a or not b:
         return a == b
@@ -578,7 +597,7 @@ def _busy_message(records):
     return f"All {len(records)} pool instances are leased: {held}. Wait for one to be released."
 
 
-def lease(src=None, who=None, label=None, session=None, link=None):
+def lease(src, who=None, label=None, session=None, link=None):
     """Leases a SketchUp to who (default: this process), and returns its
     record with what happened:
 
@@ -590,14 +609,15 @@ def lease(src=None, who=None, label=None, session=None, link=None):
     holds, unless its SketchUp has died or runs another src, when it's
     replaced.
 
-    src is the Shellify source folder (a session's worktree); default
-    SHELLIFY_SRC. label (what the holder is doing, such as a session's
-    title), session (the Claude desktop app's id for it) and link (a URL that
-    opens it) are recorded with the lease, for the badge the extension shows
-    in a leased SketchUp's viewport.
+    src is required: the Shellify source folder the holder works in (a
+    session's worktree, or the main checkout), which must exist and have
+    shellify.rb in it (see check_src). label (what the holder is doing, such
+    as a session's title), session (the Claude desktop app's id for it) and
+    link (a URL that opens it) are recorded with the lease, for the badge the
+    extension shows in a leased SketchUp's viewport.
     """
+    src = check_src(src)
     who = who or holder()
-    src = normalize_src(src or os.environ.get("SHELLIFY_SRC"))
     now = _now()
     with _locked():
         records = _load()
@@ -707,7 +727,8 @@ def main(argv=None):
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("status", help="show the pool")
     p = sub.add_parser("lease", help="lease an instance, starting it if need be")
-    p.add_argument("--src", help="Shellify source folder (default: SHELLIFY_SRC)")
+    p.add_argument("--src", required=True,
+                   help="the Shellify source folder you work in (it must have shellify.rb)")
     p.add_argument("--label", help="what it's for, shown in SketchUp's viewport")
     p.add_argument("--holder", type=int, help="pid of the process the lease belongs to")
     p = sub.add_parser("release", help="release the lease; SketchUp keeps running")

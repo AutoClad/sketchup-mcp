@@ -104,18 +104,22 @@ Once connected, Claude can interact with Sketchup using the following capabiliti
 Several sessions on one Windows machine each drive a SketchUp of their own
 (`src/sketchup_mcp/launcher.py`): a pool of four instances, on ports
 9877-9880, each with its own copy of a template model
-(`SKETCHUP_POOL_TEMPLATE`) and its own `SHELLIFY_SRC`. The server's
+(`SKETCHUP_POOL_TEMPLATE`) and its own source folder (the lease's `src`,
+passed to Shellify's dev loader as `SHELLIFY_SRC`). The server's
 instructions tell every session these rules.
 
-* `lease_sketchup(src, label)` leases one, preferring a free instance already
-  running on `src`, and otherwise starting or restarting one on a fresh copy
-  of the template. Its reply says which (`fresh`). Every tool goes to the
+* `lease_sketchup(src, label)` leases one. `src` is required, with no
+  default: the folder the session works in (its worktree, or the main
+  checkout). A lease is refused at once if it's missing, isn't an existing
+  folder, or has no `shellify.rb` in it. A lease prefers a free instance
+  already running on `src`, and otherwise starts or restarts one on a fresh
+  copy of the template. Its reply says which (`fresh`). Every tool goes to the
   leased SketchUp, and fails until there is one. A session holds one at a
   time; leasing again returns the same one.
 * `release_sketchup()` frees it, as soon as the task is done; SketchUp keeps
   running. A lease also ends when its MCP server exits.
-* If a leased SketchUp dies, the next call runs nothing, leases again and
-  says so.
+* If a leased SketchUp dies, the next call runs nothing, leases again on
+  the `src` recorded with the lease, and says so.
 * While leased, a pool instance shows Claude's icon in the bottom left of
   its viewport (an overlay; hovering shows the `label`), and a "Claude"
   toolbar whose button opens the session that holds it, when the server ran
@@ -123,8 +127,8 @@ instructions tell every session these rules.
   `su_mcp/su_mcp/images/claude.svg`, is from Wikimedia Commons
   (File:Claude-ai-icon.svg, CC0); the PNGs beside it are renders of it.
 * `sketchup-launcher status | lease --src <folder> [--label <text>] | release`
-  does the same from a shell; the lease belongs to that shell, or to
-  `--holder <pid>`.
+  does the same from a shell (`--src` is required, and checked the same
+  way); the lease belongs to that shell, or to `--holder <pid>`.
 
 The state is `%LOCALAPPDATA%\sketchup-mcp\pool.json`, under a lock file.
 SketchUp is started by a scheduled task per instance ("SketchUp pool
