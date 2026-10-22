@@ -2,9 +2,9 @@ import json
 import logging
 import os
 import socket
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from mcp.server.fastmcp import Context, FastMCP
@@ -18,232 +18,127 @@ __version__ = "0.1.17"
 logger.info(f"SketchupMCP Server version {__version__} starting up")
 
 
+def _new_socket() -> socket.socket:
+    return socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+
+
 @dataclass
 class SketchupConnection:
+    """Talks to the SketchUp extension's socket server.
+
+    The extension serves ONE request per connection, on SketchUp's main
+    thread: it accepts, reads one newline-terminated JSON-RPC request, writes
+    one reply, and closes. So this client opens a fresh connection for each
+    command and closes it as soon as the reply is read. It never holds an
+    idle connection: an open connection with no request on it is exactly what
+    the extension is waiting on, and while it waits SketchUp is unresponsive.
+    """
+
     host: str
     port: int
-    sock: socket.socket = None
+    socket_factory: Callable[[], socket.socket] = field(default=_new_socket)
+    timeout: float = 15.0
 
-    def connect(self) -> bool:
-        """Connect to the Sketchup extension socket server"""
-        if self.sock:
+    def send_command(self, method: str, params: dict[str, Any] = None, request_id: Any = None) -> dict[str, Any]:
+        """Send a JSON-RPC request to Sketchup and return the response"""
+        if method == "tools/call" and params and "name" in params and "arguments" in params:
+            request = {"jsonrpc": "2.0", "method": method, "params": params, "id": request_id}
+        else:
+            # A direct command: wrap it as a tools/call.
+            request = {
+                "jsonrpc": "2.0",
+                "method": "tools/call",
+                "params": {"name": method, "arguments": params or {}},
+                "id": request_id,
+            }
+        request_bytes = json.dumps(request).encode("utf-8") + b"\n"
+
+        # Only failures to connect are retried: once the request is sent,
+        # retrying could run a command (say, an eval) twice.
+        max_attempts = 3
+        for attempt in range(1, max_attempts + 1):
+            sock = self.socket_factory()
             try:
-                # Test if connection is still alive
-                self.sock.settimeout(0.1)
-                self.sock.send(b"")
-                return True
-            except (OSError, BrokenPipeError, ConnectionResetError):
-                # Connection is dead, close it and reconnect
-                logger.info("Connection test failed, reconnecting...")
-                self.disconnect()
+                sock.settimeout(self.timeout)
+                try:
+                    sock.connect((self.host, self.port))
+                except (ConnectionRefusedError, TimeoutError, OSError) as e:
+                    if attempt == max_attempts:
+                        raise Exception(
+                            f"Could not connect to Sketchup at {self.host}:{self.port}: {e}. "
+                            "In SketchUp: Extensions > MCP Server > Start Server."
+                        ) from e
+                    logger.warning(f"Connect attempt {attempt}/{max_attempts} failed: {e}")
+                    continue
 
-        try:
-            self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.sock.connect((self.host, self.port))
-            logger.info(f"Connected to Sketchup at {self.host}:{self.port}")
-            return True
-        except Exception as e:
-            logger.error(f"Failed to connect to Sketchup: {str(e)}")
-            self.sock = None
-            return False
-
-    def disconnect(self):
-        """Disconnect from the Sketchup extension"""
-        if self.sock:
-            try:
-                self.sock.close()
-            except Exception as e:
-                logger.error(f"Error disconnecting from Sketchup: {str(e)}")
+                logger.info(f"Sending JSON-RPC request: {request}")
+                sock.sendall(request_bytes)
+                response_data = self.receive_full_response(sock)
             finally:
-                self.sock = None
+                sock.close()
+
+            try:
+                response = json.loads(response_data.decode("utf-8"))
+            except json.JSONDecodeError as e:
+                logger.error(f"Raw response (first 200 bytes): {response_data[:200]}")
+                raise Exception(f"Invalid response from Sketchup: {str(e)}") from e
+
+            if not isinstance(response, dict):
+                return response
+            if "error" in response:
+                logger.error(f"Sketchup error: {response['error']}")
+                raise Exception(response["error"].get("message", "Unknown error from Sketchup"))
+            return response.get("result", {})
+
+        raise Exception("unreachable")
 
     def receive_full_response(self, sock, buffer_size=8192):
         """Receive the complete response, potentially in multiple chunks"""
         chunks = []
-        sock.settimeout(15.0)
-
         try:
             while True:
-                try:
-                    chunk = sock.recv(buffer_size)
-                    if not chunk:
-                        if not chunks:
-                            raise Exception("Connection closed before receiving any data")
-                        break
-
-                    chunks.append(chunk)
-
-                    try:
-                        data = b"".join(chunks)
-                        json.loads(data.decode("utf-8"))
-                        logger.info(f"Received complete response ({len(data)} bytes)")
-                        return data
-                    except json.JSONDecodeError:
-                        continue
-                except TimeoutError:
-                    logger.warning("Socket timeout during chunked receive")
+                chunk = sock.recv(buffer_size)
+                if not chunk:
+                    if not chunks:
+                        raise Exception("Connection closed before receiving any data")
                     break
-                except (ConnectionError, BrokenPipeError, ConnectionResetError) as e:
-                    logger.error(f"Socket connection error during receive: {str(e)}")
-                    raise
+                chunks.append(chunk)
+                try:
+                    data = b"".join(chunks)
+                    json.loads(data.decode("utf-8"))
+                    logger.info(f"Received complete response ({len(data)} bytes)")
+                    return data
+                except json.JSONDecodeError:
+                    continue
         except TimeoutError:
-            logger.warning("Socket timeout during chunked receive")
-        except Exception as e:
-            logger.error(f"Error during receive: {str(e)}")
-            raise
+            logger.warning("Socket timeout during receive")
 
         if chunks:
             data = b"".join(chunks)
-            logger.info(f"Returning data after receive completion ({len(data)} bytes)")
             try:
                 json.loads(data.decode("utf-8"))
                 return data
-            except json.JSONDecodeError:
-                raise Exception("Incomplete JSON response received")
-        else:
-            raise Exception("No data received")
-
-    def send_command(self, method: str, params: dict[str, Any] = None, request_id: Any = None) -> dict[str, Any]:
-        """Send a JSON-RPC request to Sketchup and return the response"""
-        # Try to connect if not connected
-        if not self.connect():
-            raise ConnectionError("Not connected to Sketchup")
-
-        # Ensure we're sending a proper JSON-RPC request
-        if method == "tools/call" and params and "name" in params and "arguments" in params:
-            # This is already in the correct format
-            request = {"jsonrpc": "2.0", "method": method, "params": params, "id": request_id}
-        else:
-            # This is a direct command - convert to JSON-RPC
-            command_name = method
-            command_params = params or {}
-
-            # Log the conversion
-            logger.info(f"Converting direct command '{command_name}' to JSON-RPC format")
-
-            request = {
-                "jsonrpc": "2.0",
-                "method": "tools/call",
-                "params": {"name": command_name, "arguments": command_params},
-                "id": request_id,
-            }
-
-        # Maximum number of retries
-        max_retries = 2
-        retry_count = 0
-
-        while retry_count <= max_retries:
-            try:
-                logger.info(f"Sending JSON-RPC request: {request}")
-
-                # Log the exact bytes being sent
-                request_bytes = json.dumps(request).encode("utf-8") + b"\n"
-                logger.info(f"Raw bytes being sent: {request_bytes}")
-
-                self.sock.sendall(request_bytes)
-                logger.info("Request sent, waiting for response...")
-
-                self.sock.settimeout(15.0)
-
-                response_data = self.receive_full_response(self.sock)
-                logger.info(f"Received {len(response_data)} bytes of data")
-
-                response = json.loads(response_data.decode("utf-8"))
-                logger.info(f"Response parsed: {response}")
-
-                if not isinstance(response, dict):
-                    return response
-
-                if "error" in response:
-                    logger.error(f"Sketchup error: {response['error']}")
-                    raise Exception(response["error"].get("message", "Unknown error from Sketchup"))
-
-                return response.get("result", {})
-
-            except (TimeoutError, ConnectionError, BrokenPipeError, ConnectionResetError) as e:
-                logger.warning(f"Connection error (attempt {retry_count + 1}/{max_retries + 1}): {str(e)}")
-                retry_count += 1
-
-                if retry_count <= max_retries:
-                    logger.info("Retrying connection...")
-                    self.disconnect()
-                    if not self.connect():
-                        logger.error("Failed to reconnect")
-                        break
-                else:
-                    logger.error("Max retries reached, giving up")
-                    self.sock = None
-                    raise Exception(f"Connection to Sketchup lost after {max_retries + 1} attempts: {str(e)}")
-
             except json.JSONDecodeError as e:
-                logger.error(f"Invalid JSON response from Sketchup: {str(e)}")
-                if "response_data" in locals() and response_data:
-                    logger.error(f"Raw response (first 200 bytes): {response_data[:200]}")
-                raise Exception(f"Invalid response from Sketchup: {str(e)}")
-
-            except Exception as e:
-                logger.error(f"Error communicating with Sketchup: {str(e)}")
-                self.sock = None
-                raise Exception(f"Communication error with Sketchup: {str(e)}")
+                raise Exception("Incomplete JSON response received") from e
+        raise Exception("No data received")
 
 
-# Global connection management
-_sketchup_connection = None
-
-
-def get_sketchup_connection():
-    """Get or create a persistent Sketchup connection"""
-    global _sketchup_connection
-
-    if _sketchup_connection is not None:
-        try:
-            # Test connection with a ping command
-            ping_request = {"jsonrpc": "2.0", "method": "ping", "params": {}, "id": 0}
-            _sketchup_connection.sock.sendall(json.dumps(ping_request).encode("utf-8") + b"\n")
-            # Read and discard the reply so it doesn't desync the next real
-            # request/response pair. The extension answers ping with a
-            # "Method not found" error, which still proves liveness.
-            _sketchup_connection.receive_full_response(_sketchup_connection.sock)
-            return _sketchup_connection
-        except Exception as e:
-            logger.warning(f"Existing connection is no longer valid: {str(e)}")
-            try:
-                _sketchup_connection.disconnect()
-            except:
-                pass
-            _sketchup_connection = None
-
-    if _sketchup_connection is None:
-        _sketchup_connection = SketchupConnection(
-            host=os.environ.get("SKETCHUP_HOST", "localhost"), port=int(os.environ.get("SKETCHUP_PORT", "9876"))
-        )
-        if not _sketchup_connection.connect():
-            logger.error("Failed to connect to Sketchup")
-            _sketchup_connection = None
-            raise Exception("Could not connect to Sketchup. Make sure the Sketchup extension is running.")
-        logger.info("Created new persistent connection to Sketchup")
-
-    return _sketchup_connection
+def get_sketchup_connection() -> SketchupConnection:
+    """A client for the configured SketchUp. Opens no socket: each command does."""
+    return SketchupConnection(
+        host=os.environ.get("SKETCHUP_HOST", "localhost"), port=int(os.environ.get("SKETCHUP_PORT", "9876"))
+    )
 
 
 @asynccontextmanager
 async def server_lifespan(server: FastMCP) -> AsyncIterator[dict[str, Any]]:
-    """Manage server startup and shutdown lifecycle"""
+    """Startup and shutdown. Deliberately does not connect to SketchUp: an idle
+    connection would block the extension, and SketchUp with it, until the
+    first tool call (see SketchupConnection)."""
+    logger.info("SketchupMCP server starting up")
     try:
-        logger.info("SketchupMCP server starting up")
-        try:
-            get_sketchup_connection()
-            logger.info("Successfully connected to Sketchup on startup")
-        except Exception as e:
-            logger.warning(f"Could not connect to Sketchup on startup: {str(e)}")
-            logger.warning("Make sure the Sketchup extension is running")
         yield {}
     finally:
-        global _sketchup_connection
-        if _sketchup_connection:
-            logger.info("Disconnecting from Sketchup")
-            _sketchup_connection.disconnect()
-            _sketchup_connection = None
         logger.info("SketchupMCP server shut down")
 
 

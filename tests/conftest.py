@@ -10,16 +10,20 @@ from sketchup_mcp import server
 class FakeSocket:
     """Stands in for socket.socket. Records what was sent, replays scripted replies."""
 
-    def __init__(self, replies=None):
+    def __init__(self, replies=None, refuse=False):
         # Each reply is bytes delivered by one recv() call; [] means "closed".
         self.replies = list(replies or [])
         self.sent = b""
         self.closed = False
         self.timeout = None
+        self.address = None
+        self.refuse = refuse
 
     # -- methods the server calls --
-    def connect(self, _addr):
-        pass
+    def connect(self, addr):
+        if self.refuse:
+            raise ConnectionRefusedError("refused")
+        self.address = addr
 
     def settimeout(self, t):
         self.timeout = t
@@ -46,19 +50,32 @@ def json_reply(obj):
 
 @pytest.fixture
 def make_connection():
-    """Build a SketchupConnection whose socket is a FakeSocket with the given replies."""
+    """Build a SketchupConnection whose next socket is a FakeSocket with the given replies.
 
-    def _make(replies=None):
-        sock = FakeSocket(replies)
-        conn = server.SketchupConnection(host="test-host", port=1, sock=sock)
-        return conn, sock
+    Returns (conn, sock) for the common one-command case; conn.sockets lists
+    every socket the connection opened, in order.
+    """
+
+    def _make(replies=None, *more_replies, refuse_first=0):
+        scripts = [replies, *more_replies]
+        opened = []
+
+        def factory():
+            index = len(opened)
+            refuse = index < refuse_first
+            script = None if refuse else scripts[min(index - refuse_first, len(scripts) - 1)]
+            sock = FakeSocket(script, refuse=refuse)
+            opened.append(sock)
+            return sock
+
+        conn = server.SketchupConnection(host="test-host", port=1, socket_factory=factory)
+        conn.sockets = opened
+        first = FakeSocket(scripts[0])  # placeholder until a command runs
+
+        class _Lazy:
+            def __getattr__(self, name):
+                return getattr(opened[refuse_first] if len(opened) > refuse_first else first, name)
+
+        return conn, _Lazy()
 
     return _make
-
-
-@pytest.fixture(autouse=True)
-def reset_global_connection():
-    """The module caches one connection globally; isolate tests from each other."""
-    server._sketchup_connection = None
-    yield
-    server._sketchup_connection = None

@@ -36,94 +36,26 @@ module SU_MCP
       STDOUT.flush
     end
 
+    # The server runs on SketchUp's main thread (a UI timer), so it must never
+    # block: a blocking read here freezes SketchUp. Each tick accepts any new
+    # connections and reads whatever bytes have arrived on each waiting one,
+    # without waiting. A request is one newline-terminated JSON line; a client
+    # that has not sent a complete line within IDLE_TIMEOUT seconds is
+    # dropped, so a client that connects and stays silent cannot hold
+    # anything up.
+    IDLE_TIMEOUT = 5.0
+    MAX_REQUEST_BYTES = 10 * 1024 * 1024
+
     def start
       return if @running
-      
+
       begin
         log "Starting server on #{@bind}:#{@port}..."
-        
         @server = TCPServer.new(@bind, @port)
-        log "Server created on port #{@port}"
-        
+        @pending = []
         @running = true
-        
-        @timer_id = UI.start_timer(0.1, true) {
-          begin
-            if @running
-              # Check for connection
-              ready = IO.select([@server], nil, nil, 0)
-              if ready
-                log "Connection waiting..."
-                client = @server.accept_nonblock
-                log "Client accepted"
-                
-                data = client.gets
-                log "Raw data: #{data.inspect}"
-                
-                if data
-                  begin
-                    # Parse the raw JSON first to check format
-                    raw_request = JSON.parse(data)
-                    log "Raw parsed request: #{raw_request.inspect}"
-                    
-                    # Extract the original request ID if it exists in the raw data
-                    original_id = nil
-                    if data =~ /"id":\s*(\d+)/
-                      original_id = $1.to_i
-                      log "Found original request ID: #{original_id}"
-                    end
-                    
-                    # Use the raw request directly without transforming it
-                    # Just ensure the ID is preserved if it exists
-                    request = raw_request
-                    if !request["id"] && original_id
-                      request["id"] = original_id
-                      log "Added missing ID: #{original_id}"
-                    end
-                    
-                    log "Processed request: #{request.inspect}"
-                    response = handle_jsonrpc_request(request)
-                    response_json = response.to_json + "\n"
-                    
-                    log "Sending response: #{response_json.strip}"
-                    client.write(response_json)
-                    client.flush
-                    log "Response sent"
-                  rescue JSON::ParserError => e
-                    log "JSON parse error: #{e.message}"
-                    error_response = {
-                      jsonrpc: "2.0",
-                      error: { code: -32700, message: "Parse error" },
-                      id: original_id
-                    }.to_json + "\n"
-                    client.write(error_response)
-                    client.flush
-                  rescue StandardError => e
-                    log "Request error: #{e.message}"
-                    error_response = {
-                      jsonrpc: "2.0",
-                      error: { code: -32603, message: e.message },
-                      id: request ? request["id"] : original_id
-                    }.to_json + "\n"
-                    client.write(error_response)
-                    client.flush
-                  end
-                end
-                
-                client.close
-                log "Client closed"
-              end
-            end
-          rescue IO::WaitReadable
-            # Normal for accept_nonblock
-          rescue StandardError => e
-            log "Timer error: #{e.message}"
-            log e.backtrace.join("\n")
-          end
-        }
-        
+        @timer_id = UI.start_timer(0.1, true) { tick }
         log "Server started and listening"
-        
       rescue StandardError => e
         log "Error: #{e.message}"
         log e.backtrace.join("\n")
@@ -134,18 +66,103 @@ module SU_MCP
     def stop
       log "Stopping server..."
       @running = false
-      
+
       if @timer_id
         UI.stop_timer(@timer_id)
         @timer_id = nil
       end
-      
+
+      (@pending || []).each { |p| close_quietly(p[:client]) }
+      @pending = []
       @server.close if @server
       @server = nil
       log "Server stopped"
     end
 
     private
+
+    def tick
+      return unless @running
+
+      accept_new_clients
+      @pending.dup.each { |pending| poll(pending) }
+    rescue StandardError => e
+      log "Timer error: #{e.message}"
+      log e.backtrace.join("\n")
+    end
+
+    def accept_new_clients
+      loop do
+        client = @server.accept_nonblock
+        @pending << { client: client, buffer: +"", deadline: Time.now + IDLE_TIMEOUT }
+      end
+    rescue IO::WaitReadable, Errno::EINTR
+      nil # no more connections waiting
+    end
+
+    # Reads what has arrived without blocking; serves the request once a full
+    # line is in; drops the client on close, overflow or idleness.
+    def poll(pending)
+      client = pending[:client]
+      begin
+        loop { pending[:buffer] << client.read_nonblock(65_536) }
+      rescue IO::WaitReadable
+        nil # nothing more right now
+      rescue EOFError, IOError, SystemCallError
+        return finish(pending) unless pending[:buffer].include?("\n") # closed before a full request
+      end
+
+      if (newline = pending[:buffer].index("\n"))
+        @pending.delete(pending) # serve closes it after replying
+        serve(client, pending[:buffer][0..newline])
+      elsif pending[:buffer].bytesize > MAX_REQUEST_BYTES
+        log "Dropping client: request larger than #{MAX_REQUEST_BYTES} bytes"
+        finish(pending)
+      elsif Time.now > pending[:deadline]
+        log "Dropping idle client: no request within #{IDLE_TIMEOUT}s"
+        finish(pending)
+      end
+    end
+
+    def finish(pending)
+      @pending.delete(pending)
+      close_quietly(pending[:client])
+    end
+
+    def close_quietly(client)
+      client.close
+    rescue StandardError
+      nil
+    end
+
+    # One request, one reply, then close (the protocol the Python client uses).
+    def serve(client, data)
+      log "Raw data: #{data.inspect}"
+      original_id = data =~ /"id":\s*(\d+)/ ? Regexp.last_match(1).to_i : nil
+      request = nil
+      begin
+        request = JSON.parse(data)
+        request["id"] = original_id if !request["id"] && original_id
+        response = handle_jsonrpc_request(request)
+        reply(client, response.to_json)
+      rescue JSON::ParserError => e
+        log "JSON parse error: #{e.message}"
+        reply(client, { jsonrpc: "2.0", error: { code: -32700, message: "Parse error" }, id: original_id }.to_json)
+      rescue StandardError => e
+        log "Request error: #{e.message}"
+        reply(client, { jsonrpc: "2.0", error: { code: -32603, message: e.message },
+                        id: request ? request["id"] : original_id }.to_json)
+      end
+    end
+
+    def reply(client, json)
+      client.write(json + "\n")
+      client.flush
+    rescue StandardError => e
+      log "Could not send reply: #{e.message}"
+    ensure
+      close_quietly(client)
+    end
 
     def handle_jsonrpc_request(request)
       log "Handling JSONRPC request: #{request.inspect}"

@@ -11,12 +11,25 @@ Bridge between Claude Code and a running SketchUp. Python MCP server
     uvx ruff check . && uvx ruff format --check .   # lint + format check
     cd su_mcp && zip -r ../su_mcp.rbz su_mcp.rb su_mcp/ extension.json   # build the extension
 
+## Protocol
+
+One request per connection: the client connects, sends one
+newline-terminated JSON-RPC line, reads one reply, and the server closes.
+The Ruby server runs on SketchUp's main thread (a UI timer), so it never
+blocks: it reads whatever has arrived on each tick and drops a client that
+has not sent a full line within `IDLE_TIMEOUT` (5 s). The Python client
+opens a fresh connection per command and never connects at startup. A
+client that holds a connection open without sending a request used to
+freeze SketchUp; that is why both halves work this way.
+
 ## Rules
 
 - Python targets the mcp SDK 1.x (`FastMCP`) until we migrate to 2.x. Keep `mcp<2`.
 - Host/port come from `SKETCHUP_HOST` / `SKETCHUP_PORT`; never hard-code.
 - The Ruby server binds 127.0.0.1 by default. 0.0.0.0 only for a VM setup, never as the default.
 - Any change to the wire protocol gets a test in `tests/test_connection.py`.
+- Nothing in `su_mcp/` may block SketchUp's main thread: no blocking reads,
+  no `sleep`, no waiting on a client.
 - Prefer adding AutoClad-specific tools over extending the woodworking ones.
 
 ## Branching
