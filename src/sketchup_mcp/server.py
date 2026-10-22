@@ -27,7 +27,7 @@ logger = logging.getLogger("SketchupMCPServer")
 EVAL_TIMEOUT = float(os.environ.get("SKETCHUP_MCP_EVAL_TIMEOUT", "50"))
 
 # Define version directly to avoid pkg_resources dependency
-__version__ = "0.1.18"
+__version__ = "0.2.0"
 logger.info(f"SketchupMCP Server version {__version__} starting up")
 
 class SketchupRubyError(Exception):

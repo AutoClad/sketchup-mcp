@@ -1,6 +1,6 @@
 """Sketchup integration through Model Context Protocol"""
 
-__version__ = "0.1.18"
+__version__ = "0.2.0"
 
 
 def __getattr__(name):
