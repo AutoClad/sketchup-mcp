@@ -65,10 +65,12 @@ HOST = "127.0.0.1"
 SKETCHUP_EXE = Path(os.environ.get(
     "SKETCHUP_EXE", r"C:\Program Files\SketchUp\SketchUp 2026\SketchUp\SketchUp.exe"))
 
-# Copied for each instance as it starts. An empty model, so a fresh instance
-# has nothing in it but what its session builds.
+# Copied for each instance as it starts. By default an empty model shipped
+# with the package, so a fresh instance has nothing in it but what its
+# session builds: SketchUp 2026's Simple template (architectural inches)
+# with its scale figure and the figure's materials removed.
 TEMPLATE = Path(os.environ.get(
-    "SKETCHUP_POOL_TEMPLATE", str(Path.home() / "Desktop" / "shellify scratch.skp")))
+    "SKETCHUP_POOL_TEMPLATE", str(Path(__file__).with_name("empty.skp"))))
 
 # SketchUp 2026 autosaves to this folder, keyed by the model's file name
 # only, and after a crash asks whether to open the "recovered version"

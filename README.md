@@ -103,9 +103,12 @@ Once connected, Claude can interact with Sketchup using the following capabiliti
 
 Several sessions on one Windows machine each drive a SketchUp of their own
 (`src/sketchup_mcp/launcher.py`): a pool of four instances, on ports
-9877-9880, each with its own copy of a template model
-(`SKETCHUP_POOL_TEMPLATE`) and its own source folder (the lease's `src`,
-passed to Shellify's dev loader as `SHELLIFY_SRC`). The server's
+9877-9880, each with its own copy of a template model and its own source
+folder. The template is an empty model shipped with the package
+(`src/sketchup_mcp/empty.skp`: SketchUp 2026's Simple template, in
+architectural inches, with its scale figure removed), unless
+`SKETCHUP_POOL_TEMPLATE` names another. The source folder is the lease's `src`,
+passed to Shellify's dev loader as `SHELLIFY_SRC`. The server's
 instructions tell every session these rules.
 
 * `lease_sketchup(src, label)` leases one. `src` is required, with no
