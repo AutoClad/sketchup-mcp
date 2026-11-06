@@ -119,19 +119,30 @@ instructions tell every session these rules.
   copy of the template. Its reply says which (`fresh`). Every tool goes to the
   leased SketchUp, and fails until there is one. A session holds one at a
   time; leasing again returns the same one.
+* `lease_sketchup(src, label, instance)` leases a particular one, to go on
+  with what another session left in its model: `instance` is its name
+  (`sketchup-2`), its port, or the label or session id of the session that
+  holds or last held it (each instance keeps its last lease, `last_lease`,
+  until it restarts). It's leased only if it's free and running, and never
+  restarted. If it runs another `src`, Shellify's dev loader reloads from
+  the new one (`Shellify.sync(src)`, through `eval_ruby`), keeping the model.
 * `release_sketchup()` frees it, as soon as the task is done; SketchUp keeps
   running. A lease also ends when its MCP server exits.
 * If a leased SketchUp dies, the next call runs nothing, leases again on
   the `src` recorded with the lease, and says so.
 * While leased, a pool instance shows Claude's icon in the bottom left of
-  its viewport (an overlay; hovering shows the `label`), and a "Claude"
+  its viewport (an overlay; hovering shows the `label` and the instance's
+  name), and a "Claude"
   toolbar whose button opens the session that holds it, when the server ran
   in the Claude desktop app (`su_mcp/su_mcp/lease_badge.rb`). The icon,
   `su_mcp/su_mcp/images/claude.svg`, is from Wikimedia Commons
   (File:Claude-ai-icon.svg, CC0); the PNGs beside it are renders of it.
-* `sketchup-launcher status | lease --src <folder> [--label <text>] | release`
+* `sketchup-launcher status | lease --src <folder> [--label <text>] [--instance <name>] | release`
   does the same from a shell (`--src` is required, and checked the same
   way); the lease belongs to that shell, or to `--holder <pid>`.
+* The launcher's tests, `tests/test_launcher.py`, start no SketchUp. Run
+  them from the checkout being tested, with its `src` first on the path:
+  `$env:PYTHONPATH = "$PWD\src"; python -m unittest discover -s tests`.
 
 The state is `%LOCALAPPDATA%\sketchup-mcp\pool.json`, under a lock file.
 SketchUp is started by a scheduled task per instance ("SketchUp pool

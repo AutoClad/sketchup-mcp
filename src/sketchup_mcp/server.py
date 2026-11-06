@@ -411,7 +411,9 @@ mcp = FastMCP(
         "Call release_sketchup as soon as your task is done, before you end your turn, even if "
         "the user may come back later: an idle lease keeps a SketchUp from everyone else. If "
         "you come back to work after releasing, lease again; you may get another SketchUp, "
-        "or a fresh model, so check what you rely on."
+        "or a fresh model, so check what you rely on. When the user asks you to take over a "
+        "particular SketchUp (\"sketchup-2\", or \"the one the canopy session used\"), pass it "
+        "as lease_sketchup's instance: you get it as it is, model and all, if it's free."
     ),
     lifespan=server_lifespan
 )
@@ -796,7 +798,8 @@ def _lease_reply(record: Dict[str, Any]) -> Dict[str, Any]:
 async def lease_sketchup(
     ctx: Context,
     src: str,
-    label: str = None
+    label: str = None,
+    instance: str = None
 ) -> str:
     """Lease a SketchUp of this session's own from the pool. Call it before
     any other SketchUp tool: with no lease they fail. A session holds one
@@ -812,12 +815,19 @@ async def lease_sketchup(
     which can take a minute. The reply's "fresh" says which: a reused
     instance's model is as its last holder left it.
 
+    *instance* is only for when the user asks you to take over a particular
+    SketchUp, to go on with what's in its model: its name ("sketchup-2"),
+    its port, or the label (title) of the session that last used it. It's
+    leased only if it's free (otherwise the reply names who holds it) and
+    is never restarted: its model is kept, and if it runs another folder,
+    Shellify is reloaded from *src*.
+
     Release it with release_sketchup as soon as your task is done. If the
     leased SketchUp dies, the next call leases again and says so."""
     try:
         session, link = session_identity()
         record = await asyncio.to_thread(
-            launcher.lease, src, session_holder(), label, session, link)
+            launcher.lease, src, session_holder(), label, session, link, instance)
         return json.dumps(_lease_reply(record))
     except Exception as e:
         logger.error(f"Error in lease_sketchup: {str(e)}")

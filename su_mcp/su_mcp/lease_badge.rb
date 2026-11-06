@@ -26,6 +26,7 @@ module SU_MCP
 
     @lease = nil
     @src = nil
+    @name = nil
     @failed = false
 
     class << self
@@ -61,11 +62,12 @@ module SU_MCP
     end
 
     def self.poll
-      lease, src = read
-      return if lease == @lease && src == @src
+      lease, src, name = read
+      return if lease == @lease && src == @src && name == @name
 
       @lease = lease
       @src = src
+      @name = name
       update_toolbar
       view = Sketchup.active_model&.active_view
       view&.invalidate
@@ -75,18 +77,19 @@ module SU_MCP
       @failed = true
     end
 
-    # [lease or nil, source folder] for this instance: its record in the
-    # pool's state file, found by port and checked to be this process.
+    # [lease or nil, source folder, instance name] for this instance: its
+    # record in the pool's state file, found by port and checked to be this
+    # process.
     def self.read
-      return [nil, nil] unless File.exist?(POOL_FILE)
+      return [nil, nil, nil] unless File.exist?(POOL_FILE)
 
       data = JSON.parse(File.read(POOL_FILE))
       record = data['instances'].find { |r| r['port'] == PORT && r['pid'] == Process.pid }
-      return [nil, nil] unless record
+      return [nil, nil, nil] unless record
 
       lease = record['lease']
       lease = nil unless lease && running?(lease['holder_pid'])
-      [lease, (record['env'] || {})['SHELLIFY_SRC']]
+      [lease, (record['env'] || {})['SHELLIFY_SRC'], record['name']]
     end
 
     def self.running?(pid)
@@ -105,7 +108,8 @@ module SU_MCP
       UI.openURL(link) if link
     end
 
-    # Who holds the lease, and since when.
+    # Who holds the lease, since when, and which instance this is: the name
+    # a session can lease it by (lease_sketchup's instance).
     def self.lines
       label = @lease['label'] && !@lease['label'].empty? ? @lease['label'] : 'unknown'
       since = begin
@@ -113,7 +117,7 @@ module SU_MCP
       rescue StandardError
         '?'
       end
-      ["owner: \"#{label}\"", "since: #{since}"]
+      ["owner: \"#{label}\"", "since: #{since}", "instance: #{@name || "port #{PORT}"}"]
     end
 
     # The toolbar, shown only while leased. Its button is greyed out for a

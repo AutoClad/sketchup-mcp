@@ -24,6 +24,12 @@ Nothing is stopped for being idle. An instance is started, or restarted, only
 when a lease needs it: its SketchUp has died, never ran, or was started with
 another SHELLIFY_SRC. The user's own SketchUp, on 9876, is never touched.
 
+A lease can also name an instance, to go on with what another session left
+in its model: by its name, its port, or the session that last held it, which
+is kept (last_lease) until its SketchUp restarts. It's leased only if it's
+free, and never restarted: if it runs another source folder, the dev loader
+reloads Shellify from the new one (Shellify.sync(src)), keeping the model.
+
 The Claude desktop app is a packaged (MSIX) app, so the processes it starts,
 MCP servers included, see %LOCALAPPDATA% virtualized: a folder they create
 there goes to the package's private copy (in Packages, under LocalCache),
@@ -313,6 +319,10 @@ def _blank(port):
         # Set once it answered eval_ruby with its pid.
         "ready": False,
         "lease": None,
+        # The lease it had before, with when it ended (released_at), kept
+        # while its model is, so a lease can name an instance by the session
+        # that last used it. Cleared when SketchUp is (re)started.
+        "last_lease": None,
     }
 
 
@@ -322,7 +332,10 @@ def _load():
     except (FileNotFoundError, json.JSONDecodeError):
         state = {}
     records = {r["port"]: r for r in state.get("instances", []) if r.get("port") in PORTS}
-    return [records.get(port) or _blank(port) for port in PORTS]
+    records = [records.get(port) or _blank(port) for port in PORTS]
+    for r in records:
+        r.setdefault("last_lease", None)
+    return records
 
 
 def _save(records):
@@ -335,12 +348,19 @@ def _now():
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def _free(r, now=None):
+    """Ends r's lease, keeping it as the instance's last_lease."""
+    if r["lease"]:
+        r["last_lease"] = dict(r["lease"], released_at=now or _now())
+    r["lease"] = None
+
+
 def _reap(records):
     """Frees every lease whose holder process has gone."""
     for r in records:
         lease = r["lease"]
         if lease and not is_running(lease["holder_pid"], lease["holder_started"]):
-            r["lease"] = None
+            _free(r)
 
 
 def _held_by(lease, who):
@@ -535,11 +555,12 @@ def spawn(request):
     os.replace(tmp, out)
 
 
-def ask_pid(port, timeout=5.0):
-    """Asks the extension on port for SketchUp's pid through eval_ruby, the
-    way the MCP server sends a request: one line of JSON each way."""
+def eval_ruby(port, code, timeout=5.0):
+    """Runs code in the SketchUp on port through the extension's eval_ruby,
+    the way the MCP server sends a request (one line of JSON each way), and
+    returns its result as text."""
     request = {"jsonrpc": "2.0", "method": "tools/call", "id": 1,
-               "params": {"name": "eval_ruby", "arguments": {"code": "Process.pid"}}}
+               "params": {"name": "eval_ruby", "arguments": {"code": code}}}
     with socket.create_connection((HOST, port), timeout=timeout) as sock:
         sock.settimeout(timeout)
         sock.sendall(json.dumps(request).encode("utf-8") + b"\n")
@@ -550,7 +571,60 @@ def ask_pid(port, timeout=5.0):
                 break
             data += chunk
     reply = json.loads(data.decode("utf-8"))
-    return int(reply["result"]["content"][0]["text"])
+    if "error" in reply:
+        raise PoolError(f"eval_ruby on port {port} failed: {reply['error']}")
+    return reply["result"]["content"][0]["text"]
+
+
+def ask_pid(port, timeout=5.0):
+    """Asks the extension on port for SketchUp's pid."""
+    return int(eval_ruby(port, "Process.pid", timeout))
+
+
+def _ruby_string(text):
+    """text as a single-quoted Ruby string literal."""
+    return "'" + text.replace("\\", "\\\\").replace("'", "\\'") + "'"
+
+
+# How long reloading Shellify from another folder may take.
+SWITCH_TIMEOUT = 120.0
+
+
+def switch_src(port, src):
+    """Has the SketchUp on port load Shellify from src from now on, keeping
+    its model, through the dev loader's Shellify.sync(src). Returns (the
+    folder it loads from now, the reload's error or None): the folder is src
+    once the reload has started, even if it then raised. Raises PoolError if
+    it can't switch at all, as with a dev loader from before switching."""
+    code = f"""begin
+  require 'json'
+  if !defined?(Shellify) || !Shellify.respond_to?(:dev_src)
+    JSON.generate(old_loader: true)
+  else
+    error = begin
+      Shellify.sync({_ruby_string(src)})
+      nil
+    rescue Exception => e
+      "#{{e.class}}: #{{e.message}}"
+    end
+    JSON.generate(src: Shellify.dev_src, error: error)
+  end
+rescue Exception => e
+  JSON.generate(error: "#{{e.class}}: #{{e.message}}")
+end"""
+    text = eval_ruby(port, code, SWITCH_TIMEOUT)
+    try:
+        reply = json.loads(text)
+    except json.JSONDecodeError:
+        raise PoolError(f"Switching to {src} got an unexpected reply: {text}")
+    if reply.get("old_loader"):
+        raise PoolError(
+            "its SketchUp runs a Shellify dev loader that can't switch folders (it has no "
+            "Shellify.dev_src). Copy dev/shellify_dev.rb from the repository into SketchUp's "
+            "Plugins folder: SketchUps started after that can switch.")
+    if "src" not in reply:
+        raise PoolError(f"switching to {src} failed: {reply.get('error')}")
+    return reply["src"], reply.get("error")
 
 
 def _wait_ready(r):
@@ -599,7 +673,59 @@ def _busy_message(records):
     return f"All {len(records)} pool instances are leased: {held}. Wait for one to be released."
 
 
-def lease(src, who=None, label=None, session=None, link=None):
+def _who_held(lease):
+    """A lease's holder, in words, for messages."""
+    return f'"{lease["label"]}"' if lease.get("label") else f"holder pid {lease['holder_pid']}"
+
+
+def _describe(records):
+    """Every instance in a few words, for a message that has to say which
+    exist."""
+    parts = []
+    for r in records:
+        if r["lease"]:
+            state = f"leased to {_who_held(r['lease'])}"
+        elif not _alive(r):
+            state = "not running"
+        else:
+            last = r.get("last_lease")
+            state = f"free, last used by {_who_held(last)}" if last else "free"
+        parts.append(f"{r['name']} (port {r['port']}, {state})")
+    return "; ".join(parts)
+
+
+def find(records, instance):
+    """The instance a lease names, by its name (sketchup-2), its port (9878),
+    or the label or session id of the session that holds it or last held it.
+    A label matches whole, ignoring case, or else as part of a label; more
+    than one match is refused."""
+    text = str(instance).strip()
+    for r in records:
+        if text.lower() == r["name"].lower() or text == str(r["port"]):
+            return r
+
+    def leases(r):
+        return [lease for lease in (r["lease"], r.get("last_lease")) if lease]
+
+    def label(lease):
+        return (lease.get("label") or "").strip().lower()
+
+    matches = [r for r in records
+               if any(text == lease.get("session") or text.lower() == label(lease) for lease in leases(r))]
+    if not matches:
+        matches = [r for r in records if any(text.lower() in label(lease) for lease in leases(r))]
+    if len(matches) == 1:
+        return matches[0]
+    if not matches:
+        raise PoolError(
+            f'No pool instance is called "{text}", nor was used by a session called that (an '
+            f"instance that's been restarted since forgets who used it). The pool: {_describe(records)}.")
+    raise PoolError(
+        f'More than one pool instance was used by a session called "{text}": '
+        f"{_describe(matches)}. Name one of them (sketchup-N).")
+
+
+def lease(src, who=None, label=None, session=None, link=None, instance=None):
     """Leases a SketchUp to who (default: this process), and returns its
     record with what happened:
 
@@ -617,9 +743,16 @@ def lease(src, who=None, label=None, session=None, link=None):
     as a session's title), session (the Claude desktop app's id for it) and
     link (a URL that opens it) are recorded with the lease, for the badge the
     extension shows in a leased SketchUp's viewport.
+
+    instance names the one to lease (see find), to go on with what's in its
+    model: it's leased only if it's free and running, and never restarted.
+    If it runs another src, its Shellify is reloaded from src (see
+    switch_src).
     """
     src = check_src(src)
     who = who or holder()
+    if instance is not None and str(instance).strip():
+        return _lease_named(src, who, label, session, link, instance)
     now = _now()
     with _locked():
         records = _load()
@@ -630,7 +763,10 @@ def lease(src, who=None, label=None, session=None, link=None):
                     r["lease"].update(last_used=now, label=label or r["lease"].get("label"))
                     _save(records)
                     return dict(r, fresh=False, message=f"Already leased {r['name']} on port {r['port']}.")
-                r["lease"] = None
+                if _alive(r):
+                    _free(r, now)
+                else:
+                    r["lease"] = None
         r, start = _pick(records, src)
         if r is None:
             _save(records)
@@ -638,8 +774,10 @@ def lease(src, who=None, label=None, session=None, link=None):
         r["lease"] = {"holder_pid": who[0], "holder_started": who[1], "label": label,
                       "session": session, "link": link, "leased_at": now, "last_used": now}
         if start:
-            # Reserved under the lock; started outside it.
+            # Reserved under the lock; started outside it. Its model goes,
+            # and with it what the last holder left.
             r["ready"] = False
+            r["last_lease"] = None
             old = (r["pid"], r["started"])
         _save(records)
 
@@ -679,6 +817,74 @@ def lease(src, who=None, label=None, session=None, link=None):
         f"new copy of the template model, loading Shellify from {src}."))
 
 
+def _lease_named(src, who, label, session, link, instance):
+    """lease, for the instance it names: see lease."""
+    now = _now()
+    with _locked():
+        records = _load()
+        _reap(records)
+        r = find(records, instance)
+        mine = r["lease"] if _held_by(r["lease"], who) else None
+        if r["lease"] and not mine:
+            _save(records)
+            raise PoolError(
+                f"{r['name']} is leased to {_who_held(r['lease'])} (since {r['lease']['leased_at']}), "
+                "and an instance is leased by name only when it's free: ask that session to "
+                "release it (release_sketchup), then lease it again.")
+        if not (_alive(r) and r["ready"]):
+            _save(records)
+            raise PoolError(
+                f"{r['name']}'s SketchUp isn't running, so there's no model in it to go on with. "
+                "Lease without naming an instance to get a fresh one.")
+        for x in records:
+            if x is not r and _held_by(x["lease"], who):
+                _free(x, now)
+        r["lease"] = {"holder_pid": who[0], "holder_started": who[1],
+                      "label": label or (mine or {}).get("label"),
+                      "session": session, "link": link,
+                      "leased_at": mine["leased_at"] if mine else now, "last_used": now}
+        before = r.get("last_lease")
+        old_src = (r["env"] or {}).get("SHELLIFY_SRC")
+        _save(records)
+
+    if mine:
+        left = "as you left it"
+    elif before:
+        left = f"as {_who_held(before)} left it"
+    else:
+        left = "as its last holder left it"
+    if _same_src(old_src, src):
+        return dict(r, fresh=False, message=(
+            f"Leased {r['name']} on port {r['port']}, {left}: its model is kept, and it already "
+            "loads Shellify from this source. Call Shellify.sync."))
+
+    try:
+        now_src, error = switch_src(r["port"], src)
+    except Exception as e:
+        # Give it back, so it isn't held by a lease that never worked.
+        with _locked():
+            records = _load()
+            rec = next(x for x in records if x["port"] == r["port"])
+            if _held_by(rec["lease"], who):
+                rec["lease"] = None
+            _save(records)
+        raise PoolError(f"Couldn't switch {r['name']} to {src}, so it isn't leased: {e}")
+    with _locked():
+        records = _load()
+        rec = next(x for x in records if x["port"] == r["port"])
+        rec["env"] = dict(rec["env"] or {}, SHELLIFY_SRC=now_src)
+        if error and _held_by(rec["lease"], who):
+            rec["lease"] = None
+        _save(records)
+    if error:
+        raise PoolError(
+            f"Switching {r['name']} to {src} failed while reloading Shellify, so it isn't leased: "
+            f"{error}. Its model is kept; fix the code and lease it again.")
+    return dict(rec, fresh=False, message=(
+        f"Leased {rec['name']} on port {rec['port']}, {left}: its model is kept. It loaded "
+        f"Shellify from {old_src}; now it loads from {src} (reloaded with Shellify.sync)."))
+
+
 def release(who=None):
     """Frees who's lease. SketchUp keeps running for the next lease. Returns
     the instance's record, or None if who held none."""
@@ -689,7 +895,7 @@ def release(who=None):
         found = None
         for r in records:
             if _held_by(r["lease"], who):
-                r["lease"] = None
+                _free(r)
                 found = r
         _save(records)
     return found
@@ -732,6 +938,9 @@ def main(argv=None):
     p.add_argument("--src", required=True,
                    help="the Shellify source folder you work in (it must have shellify.rb)")
     p.add_argument("--label", help="what it's for, shown in SketchUp's viewport")
+    p.add_argument("--instance",
+                   help="the free instance to lease, model and all: its name (sketchup-2), port, "
+                        "or the label of the session that last used it")
     p.add_argument("--holder", type=int, help="pid of the process the lease belongs to")
     p = sub.add_parser("release", help="release the lease; SketchUp keeps running")
     p.add_argument("--holder", type=int)
@@ -749,7 +958,7 @@ def main(argv=None):
         else:
             who = holder(args.holder or calling_shell())
             if args.command == "lease":
-                out = lease(args.src, who, label=args.label)
+                out = lease(args.src, who, label=args.label, instance=args.instance)
             else:
                 out = release(who)
                 if out is None:
