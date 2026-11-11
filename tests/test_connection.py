@@ -9,7 +9,6 @@ again when retries=0 (eval_ruby), since it may have run.
 
 import asyncio
 import json
-import socket
 
 import pytest
 
@@ -100,7 +99,7 @@ def test_connection_closed_before_reply_raises(make_connection):
 
 
 def test_a_sent_request_is_never_retried_when_retries_is_zero(make_connection):
-    conn = make_connection({"replies": [socket.timeout("timed out")]})
+    conn = make_connection({"replies": [TimeoutError("timed out")]})
 
     with pytest.raises(Exception, match="No response from Sketchup"):
         conn.send_command("tools/call", {"name": "eval_ruby", "arguments": {"code": "x += 1"}}, retries=0)

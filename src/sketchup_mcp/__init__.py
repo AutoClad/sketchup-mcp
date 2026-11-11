@@ -9,5 +9,6 @@ def __getattr__(name):
     # the server's logging.
     if name == "mcp":
         from .server import mcp
+
         return mcp
     raise AttributeError(name)

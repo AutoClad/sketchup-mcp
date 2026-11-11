@@ -1,14 +1,16 @@
-from mcp.server.fastmcp import FastMCP, Context
-import socket
-import json
 import asyncio
+import json
 import logging
 import os
+import socket
 import sys
 import threading
-from dataclasses import dataclass, field
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import AsyncIterator, Dict, Any, List
+from dataclasses import dataclass, field
+from typing import Any
+
+from mcp.server.fastmcp import Context, FastMCP
 
 # The pool of SketchUps (see launcher.py) runs on Windows only. Elsewhere,
 # and on Windows with SKETCHUP_PORT set, tool calls go straight to one
@@ -19,8 +21,7 @@ else:
     launcher = None
 
 # Configure logging
-logging.basicConfig(level=logging.INFO, 
-                   format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("SketchupMCPServer")
 
 # How long eval_ruby waits for SketchUp before giving up.
@@ -36,6 +37,7 @@ EVAL_TIMEOUT = float(os.environ.get("SKETCHUP_MCP_EVAL_TIMEOUT", "50"))
 # Define version directly to avoid pkg_resources dependency
 __version__ = "0.2.0"
 logger.info(f"SketchupMCP Server version {__version__} starting up")
+
 
 class SketchupRubyError(Exception):
     """Sketchup handled the request and returned a JSON-RPC error.
@@ -84,7 +86,7 @@ class SketchupConnection:
             logger.error(f"Failed to connect to Sketchup: {str(e)}")
             self.sock = None
             return False
-    
+
     def _peer_closed(self) -> bool:
         """Whether the cached socket is no use for a new request
 
@@ -199,11 +201,11 @@ class SketchupConnection:
     def send_command(
         self,
         method: str,
-        params: Dict[str, Any] = None,
+        params: dict[str, Any] = None,
         request_id: Any = None,
         timeout: float = 15.0,
-        retries: int = 2
-    ) -> Dict[str, Any]:
+        retries: int = 2,
+    ) -> dict[str, Any]:
         """Send a JSON-RPC request to Sketchup and return the response
 
         timeout/retries are per call: eval_ruby can run for a long time and
@@ -221,51 +223,43 @@ class SketchupConnection:
                 "Its SketchUp may still be loading, or stopped at a dialog; if it "
                 "has died, the next call leases again."
             )
-        
+
         # Ensure we're sending a proper JSON-RPC request
         if method == "tools/call" and params and "name" in params and "arguments" in params:
             # This is already in the correct format
-            request = {
-                "jsonrpc": "2.0",
-                "method": method,
-                "params": params,
-                "id": request_id
-            }
+            request = {"jsonrpc": "2.0", "method": method, "params": params, "id": request_id}
         else:
             # This is a direct command - convert to JSON-RPC
             command_name = method
             command_params = params or {}
-            
+
             # Log the conversion
             logger.info(f"Converting direct command '{command_name}' to JSON-RPC format")
-            
+
             request = {
                 "jsonrpc": "2.0",
                 "method": "tools/call",
-                "params": {
-                    "name": command_name,
-                    "arguments": command_params
-                },
-                "id": request_id
+                "params": {"name": command_name, "arguments": command_params},
+                "id": request_id,
             }
-        
+
         # Maximum number of retries
         max_retries = retries
         retry_count = 0
-        
+
         while retry_count <= max_retries:
             try:
                 logger.info(f"Sending JSON-RPC request: {request}")
-                
+
                 # Log the exact bytes being sent
-                request_bytes = json.dumps(request).encode('utf-8') + b'\n'
+                request_bytes = json.dumps(request).encode("utf-8") + b"\n"
                 logger.info(f"Raw bytes being sent: {request_bytes}")
-                
+
                 self.sock.sendall(request_bytes)
                 logger.info(f"Request sent, waiting up to {timeout}s for response...")
-                
+
                 self.sock.settimeout(timeout)
-                
+
                 response = self.receive_response(timeout=timeout)
                 logger.info(f"Response parsed: {response}")
 
@@ -274,24 +268,22 @@ class SketchupConnection:
 
                 if "error" in response:
                     logger.error(f"Sketchup error: {response['error']}")
-                    raise SketchupRubyError(
-                        response["error"].get("message", "Unknown error from Sketchup")
-                    )
+                    raise SketchupRubyError(response["error"].get("message", "Unknown error from Sketchup"))
 
                 return response.get("result", {})
-                
-            except (socket.timeout, ConnectionError, BrokenPipeError, ConnectionResetError) as e:
-                logger.warning(f"Connection error (attempt {retry_count+1}/{max_retries+1}): {str(e)}")
+
+            except (TimeoutError, ConnectionError, BrokenPipeError, ConnectionResetError) as e:
+                logger.warning(f"Connection error (attempt {retry_count + 1}/{max_retries + 1}): {str(e)}")
                 retry_count += 1
-                
+
                 if retry_count <= max_retries:
-                    logger.info(f"Retrying connection...")
+                    logger.info("Retrying connection...")
                     self.disconnect()
                     if not self.connect():
                         logger.error("Failed to reconnect")
                         break
                 else:
-                    logger.error(f"Max retries reached, giving up")
+                    logger.error("Max retries reached, giving up")
                     self.disconnect()
                     if isinstance(e, socket.timeout):
                         raise Exception(
@@ -300,8 +292,8 @@ class SketchupConnection:
                             "sent again. Check the Ruby Console for the last "
                             "'Request #N started' without a 'finished'."
                         )
-                    raise Exception(f"Connection to Sketchup lost after {max_retries+1} attempts: {str(e)}")
-            
+                    raise Exception(f"Connection to Sketchup lost after {max_retries + 1} attempts: {str(e)}")
+
             except SketchupRubyError:
                 # Sketchup answered, it just answered with an error. The
                 # connection is fine; keep it.
@@ -316,11 +308,13 @@ class SketchupConnection:
                 self.disconnect()
                 raise Exception(f"Communication error with Sketchup: {str(e)}")
 
+
 # One connection per SketchUp, by (host, port). A session has one lease at a
 # time, but keeps the connection to an instance it leased before.
-_connections: Dict[tuple, SketchupConnection] = {}
+_connections: dict[tuple, SketchupConnection] = {}
 _connections_lock = threading.Lock()
 _holder = None
+
 
 def session_holder():
     """This MCP server's process, which its lease belongs to (see launcher)."""
@@ -328,6 +322,7 @@ def session_holder():
     if _holder is None:
         _holder = launcher.holder()
     return _holder
+
 
 def session_identity():
     """(id, link) of the Claude desktop app's session that started this
@@ -339,6 +334,7 @@ def session_identity():
     link = f"claude://claude.ai/epitaxy/{session}" if session else None
     return session, link
 
+
 def use_pool() -> bool:
     """Whether tool calls go to a SketchUp leased from the pool.
 
@@ -348,14 +344,19 @@ def use_pool() -> bool:
     """
     return launcher is not None and not os.environ.get("SKETCHUP_PORT")
 
+
 def direct_address():
     """The SketchUp tool calls go to when the pool isn't used."""
     return os.environ.get("SKETCHUP_HOST", "localhost"), int(os.environ.get("SKETCHUP_PORT", "9876"))
 
+
 def no_pool_message() -> str:
     host, port = direct_address()
-    return (f"There's no pool here: tool calls go straight to the SketchUp at {host}:{port}. "
-            "The pool runs on Windows, when SKETCHUP_PORT isn't set.")
+    return (
+        f"There's no pool here: tool calls go straight to the SketchUp at {host}:{port}. "
+        "The pool runs on Windows, when SKETCHUP_PORT isn't set."
+    )
+
 
 def resolve_instance():
     """Where this session's tool calls go: its leased SketchUp's (host, port),
@@ -377,18 +378,17 @@ def resolve_instance():
         src = (record["env"] or {}).get("SHELLIFY_SRC")
         lease = record["lease"] or {}
         try:
-            new = launcher.lease(src, session_holder(), label=lease.get("label"),
-                                 session=lease.get("session"), link=lease.get("link"))
-        except Exception as e:
-            raise Exception(
-                f"{record['name']}'s SketchUp had died, so nothing was run, and leasing "
-                f"again failed: {e}"
+            new = launcher.lease(
+                src, session_holder(), label=lease.get("label"), session=lease.get("session"), link=lease.get("link")
             )
+        except Exception as e:
+            raise Exception(f"{record['name']}'s SketchUp had died, so nothing was run, and leasing again failed: {e}")
         raise Exception(
             f"{record['name']}'s SketchUp had died, so nothing was run, and what was built "
             f"or loaded in it is gone. Instead: {new['message']} Resend once it's set up again."
         )
     return launcher.HOST, record["port"]
+
 
 def get_sketchup_connection() -> SketchupConnection:
     """The connection to this session's leased SketchUp (see resolve_instance)
@@ -408,8 +408,9 @@ def get_sketchup_connection() -> SketchupConnection:
             _connections[key] = SketchupConnection(host=key[0], port=key[1])
         return _connections[key]
 
+
 @asynccontextmanager
-async def server_lifespan(server: FastMCP) -> AsyncIterator[Dict[str, Any]]:
+async def server_lifespan(server: FastMCP) -> AsyncIterator[dict[str, Any]]:
     """Manage server startup and shutdown lifecycle"""
     try:
         logger.info("SketchupMCP server starting up")
@@ -426,21 +427,22 @@ async def server_lifespan(server: FastMCP) -> AsyncIterator[Dict[str, Any]]:
                 logger.warning(f"Could not release this session's lease: {e}")
         logger.info("SketchupMCP server shut down")
 
+
 # Create MCP server with lifespan support
 POOL_INSTRUCTIONS = (
-        "SketchUp, driven through eval_ruby. Every session uses a SketchUp of its own from a "
-        "pool, one at a time: call lease_sketchup before any other tool. Its src is required: "
-        "the folder you work in, which SketchUp loads Shellify from (your worktree, or "
-        "~/source/shellify if you work in the main checkout); it must have shellify.rb in it, "
-        "and there's no default. Set label to your session's title or a few words on your task. "
-        "Tools fail until you have a lease; there is no default SketchUp. "
-        "While leased, the SketchUp shows a Claude badge, so the user knows not to touch it. "
-        "Call release_sketchup as soon as your task is done, before you end your turn, even if "
-        "the user may come back later: an idle lease keeps a SketchUp from everyone else. If "
-        "you come back to work after releasing, lease again; you may get another SketchUp, "
-        "or a fresh model, so check what you rely on. When the user asks you to take over a "
-        "particular SketchUp (\"sketchup-2\", or \"the one the canopy session used\"), pass it "
-        "as lease_sketchup's instance: you get it as it is, model and all, if it's free."
+    "SketchUp, driven through eval_ruby. Every session uses a SketchUp of its own from a "
+    "pool, one at a time: call lease_sketchup before any other tool. Its src is required: "
+    "the folder you work in, which SketchUp loads Shellify from (your worktree, or "
+    "~/source/shellify if you work in the main checkout); it must have shellify.rb in it, "
+    "and there's no default. Set label to your session's title or a few words on your task. "
+    "Tools fail until you have a lease; there is no default SketchUp. "
+    "While leased, the SketchUp shows a Claude badge, so the user knows not to touch it. "
+    "Call release_sketchup as soon as your task is done, before you end your turn, even if "
+    "the user may come back later: an idle lease keeps a SketchUp from everyone else. If "
+    "you come back to work after releasing, lease again; you may get another SketchUp, "
+    "or a fresh model, so check what you rely on. When the user asks you to take over a "
+    'particular SketchUp ("sketchup-2", or "the one the canopy session used"), pass it '
+    "as lease_sketchup's instance: you get it as it is, model and all, if it's free."
 )
 DIRECT_INSTRUCTIONS = (
     "SketchUp, driven through eval_ruby, in the one SketchUp at SKETCHUP_HOST:SKETCHUP_PORT "
@@ -448,75 +450,56 @@ DIRECT_INSTRUCTIONS = (
     "release_sketchup aren't needed."
 )
 mcp = FastMCP(
-    "SketchupMCP",
-    instructions=POOL_INSTRUCTIONS if use_pool() else DIRECT_INSTRUCTIONS,
-    lifespan=server_lifespan
+    "SketchupMCP", instructions=POOL_INSTRUCTIONS if use_pool() else DIRECT_INSTRUCTIONS, lifespan=server_lifespan
 )
+
 
 # Tool endpoints
 @mcp.tool()
 def create_component(
-    ctx: Context,
-    type: str = "cube",
-    position: List[float] = None,
-    dimensions: List[float] = None
+    ctx: Context, type: str = "cube", position: list[float] = None, dimensions: list[float] = None
 ) -> str:
     """Create a new component in Sketchup"""
     try:
-        logger.info(f"create_component called with type={type}, position={position}, dimensions={dimensions}, request_id={ctx.request_id}")
-        
+        logger.info(
+            f"create_component called with type={type}, position={position}, dimensions={dimensions}, "
+            f"request_id={ctx.request_id}"
+        )
+
         sketchup = get_sketchup_connection()
-        
+
         params = {
             "name": "create_component",
-            "arguments": {
-                "type": type,
-                "position": position or [0,0,0],
-                "dimensions": dimensions or [1,1,1]
-            }
+            "arguments": {"type": type, "position": position or [0, 0, 0], "dimensions": dimensions or [1, 1, 1]},
         }
-        
+
         logger.info(f"Calling send_command with method='tools/call', params={params}, request_id={ctx.request_id}")
-        
-        result = sketchup.send_command(
-            method="tools/call",
-            params=params,
-            request_id=ctx.request_id
-        )
-        
+
+        result = sketchup.send_command(method="tools/call", params=params, request_id=ctx.request_id)
+
         logger.info(f"create_component result: {result}")
         return json.dumps(result)
     except Exception as e:
         logger.error(f"Error in create_component: {str(e)}")
         return f"Error creating component: {str(e)}"
 
+
 @mcp.tool()
-def delete_component(
-    ctx: Context,
-    id: str
-) -> str:
+def delete_component(ctx: Context, id: str) -> str:
     """Delete a component by ID"""
     try:
         sketchup = get_sketchup_connection()
         result = sketchup.send_command(
-            method="tools/call",
-            params={
-                "name": "delete_component",
-                "arguments": {"id": id}
-            },
-            request_id=ctx.request_id
+            method="tools/call", params={"name": "delete_component", "arguments": {"id": id}}, request_id=ctx.request_id
         )
         return json.dumps(result)
     except Exception as e:
         return f"Error deleting component: {str(e)}"
 
+
 @mcp.tool()
 def transform_component(
-    ctx: Context,
-    id: str,
-    position: List[float] = None,
-    rotation: List[float] = None,
-    scale: List[float] = None
+    ctx: Context, id: str, position: list[float] = None, rotation: list[float] = None, scale: list[float] = None
 ) -> str:
     """Transform a component's position, rotation, or scale"""
     try:
@@ -528,18 +511,16 @@ def transform_component(
             arguments["rotation"] = rotation
         if scale is not None:
             arguments["scale"] = scale
-            
+
         result = sketchup.send_command(
             method="tools/call",
-            params={
-                "name": "transform_component",
-                "arguments": arguments
-            },
-            request_id=ctx.request_id
+            params={"name": "transform_component", "arguments": arguments},
+            request_id=ctx.request_id,
         )
         return json.dumps(result)
     except Exception as e:
         return f"Error transforming component: {str(e)}"
+
 
 @mcp.tool()
 def get_selection(ctx: Context) -> str:
@@ -547,62 +528,40 @@ def get_selection(ctx: Context) -> str:
     try:
         sketchup = get_sketchup_connection()
         result = sketchup.send_command(
-            method="tools/call",
-            params={
-                "name": "get_selection",
-                "arguments": {}
-            },
-            request_id=ctx.request_id
+            method="tools/call", params={"name": "get_selection", "arguments": {}}, request_id=ctx.request_id
         )
         return json.dumps(result)
     except Exception as e:
         return f"Error getting selection: {str(e)}"
 
+
 @mcp.tool()
-def set_material(
-    ctx: Context,
-    id: str,
-    material: str
-) -> str:
+def set_material(ctx: Context, id: str, material: str) -> str:
     """Set material for a component"""
     try:
         sketchup = get_sketchup_connection()
         result = sketchup.send_command(
             method="tools/call",
-            params={
-                "name": "set_material",
-                "arguments": {
-                    "id": id,
-                    "material": material
-                }
-            },
-            request_id=ctx.request_id
+            params={"name": "set_material", "arguments": {"id": id, "material": material}},
+            request_id=ctx.request_id,
         )
         return json.dumps(result)
     except Exception as e:
         return f"Error setting material: {str(e)}"
 
+
 @mcp.tool()
-def export_scene(
-    ctx: Context,
-    format: str = "skp"
-) -> str:
+def export_scene(ctx: Context, format: str = "skp") -> str:
     """Export the current scene"""
     try:
         sketchup = get_sketchup_connection()
         result = sketchup.send_command(
-            method="tools/call",
-            params={
-                "name": "export",
-                "arguments": {
-                    "format": format
-                }
-            },
-            request_id=ctx.request_id
+            method="tools/call", params={"name": "export", "arguments": {"format": format}}, request_id=ctx.request_id
         )
         return json.dumps(result)
     except Exception as e:
         return f"Error exporting scene: {str(e)}"
+
 
 @mcp.tool()
 def create_mortise_tenon(
@@ -614,14 +573,17 @@ def create_mortise_tenon(
     depth: float = 1.0,
     offset_x: float = 0.0,
     offset_y: float = 0.0,
-    offset_z: float = 0.0
+    offset_z: float = 0.0,
 ) -> str:
     """Create a mortise and tenon joint between two components"""
     try:
-        logger.info(f"create_mortise_tenon called with mortise_id={mortise_id}, tenon_id={tenon_id}, width={width}, height={height}, depth={depth}, offsets=({offset_x}, {offset_y}, {offset_z})")
-        
+        logger.info(
+            f"create_mortise_tenon called with mortise_id={mortise_id}, tenon_id={tenon_id}, width={width}, "
+            f"height={height}, depth={depth}, offsets=({offset_x}, {offset_y}, {offset_z})"
+        )
+
         sketchup = get_sketchup_connection()
-        
+
         result = sketchup.send_command(
             method="tools/call",
             params={
@@ -634,17 +596,18 @@ def create_mortise_tenon(
                     "depth": depth,
                     "offset_x": offset_x,
                     "offset_y": offset_y,
-                    "offset_z": offset_z
-                }
+                    "offset_z": offset_z,
+                },
             },
-            request_id=ctx.request_id
+            request_id=ctx.request_id,
         )
-        
+
         logger.info(f"create_mortise_tenon result: {result}")
         return json.dumps(result)
     except Exception as e:
         logger.error(f"Error in create_mortise_tenon: {str(e)}")
         return f"Error creating mortise and tenon joint: {str(e)}"
+
 
 @mcp.tool()
 def create_dovetail(
@@ -658,14 +621,17 @@ def create_dovetail(
     num_tails: int = 3,
     offset_x: float = 0.0,
     offset_y: float = 0.0,
-    offset_z: float = 0.0
+    offset_z: float = 0.0,
 ) -> str:
     """Create a dovetail joint between two components"""
     try:
-        logger.info(f"create_dovetail called with tail_id={tail_id}, pin_id={pin_id}, width={width}, height={height}, depth={depth}, angle={angle}, num_tails={num_tails}")
-        
+        logger.info(
+            f"create_dovetail called with tail_id={tail_id}, pin_id={pin_id}, width={width}, height={height}, "
+            f"depth={depth}, angle={angle}, num_tails={num_tails}"
+        )
+
         sketchup = get_sketchup_connection()
-        
+
         result = sketchup.send_command(
             method="tools/call",
             params={
@@ -680,17 +646,18 @@ def create_dovetail(
                     "num_tails": num_tails,
                     "offset_x": offset_x,
                     "offset_y": offset_y,
-                    "offset_z": offset_z
-                }
+                    "offset_z": offset_z,
+                },
             },
-            request_id=ctx.request_id
+            request_id=ctx.request_id,
         )
-        
+
         logger.info(f"create_dovetail result: {result}")
         return json.dumps(result)
     except Exception as e:
         logger.error(f"Error in create_dovetail: {str(e)}")
         return f"Error creating dovetail joint: {str(e)}"
+
 
 @mcp.tool()
 def create_finger_joint(
@@ -703,14 +670,17 @@ def create_finger_joint(
     num_fingers: int = 5,
     offset_x: float = 0.0,
     offset_y: float = 0.0,
-    offset_z: float = 0.0
+    offset_z: float = 0.0,
 ) -> str:
     """Create a finger joint (box joint) between two components"""
     try:
-        logger.info(f"create_finger_joint called with board1_id={board1_id}, board2_id={board2_id}, width={width}, height={height}, depth={depth}, num_fingers={num_fingers}")
-        
+        logger.info(
+            f"create_finger_joint called with board1_id={board1_id}, board2_id={board2_id}, width={width}, "
+            f"height={height}, depth={depth}, num_fingers={num_fingers}"
+        )
+
         sketchup = get_sketchup_connection()
-        
+
         result = sketchup.send_command(
             method="tools/call",
             params={
@@ -724,17 +694,18 @@ def create_finger_joint(
                     "num_fingers": num_fingers,
                     "offset_x": offset_x,
                     "offset_y": offset_y,
-                    "offset_z": offset_z
-                }
+                    "offset_z": offset_z,
+                },
             },
-            request_id=ctx.request_id
+            request_id=ctx.request_id,
         )
-        
+
         logger.info(f"create_finger_joint result: {result}")
         return json.dumps(result)
     except Exception as e:
         logger.error(f"Error in create_finger_joint: {str(e)}")
         return f"Error creating finger joint: {str(e)}"
+
 
 def _eval_ruby(code: str, request_id) -> str:
     try:
@@ -744,46 +715,39 @@ def _eval_ruby(code: str, request_id) -> str:
 
         result = sketchup.send_command(
             method="tools/call",
-            params={
-                "name": "eval_ruby",
-                "arguments": {
-                    "code": code
-                }
-            },
+            params={"name": "eval_ruby", "arguments": {"code": code}},
             request_id=request_id,
             # Ruby is not idempotent: a timeout does not mean it failed, so
             # retrying would run it again. Never retry, and see EVAL_TIMEOUT
             # for why the wait is bounded by the client's timeout.
             timeout=EVAL_TIMEOUT,
-            retries=0
+            retries=0,
         )
-        
+
         logger.info(f"eval_ruby result: {result}")
-        
+
         # Format the response to include the result
         response = {
             "success": True,
-            "result": result.get("content", [{"text": "Success"}])[0].get("text", "Success") if isinstance(result.get("content"), list) and len(result.get("content", [])) > 0 else "Success"
+            "result": result.get("content", [{"text": "Success"}])[0].get("text", "Success")
+            if isinstance(result.get("content"), list) and len(result.get("content", [])) > 0
+            else "Success",
         }
-        
+
         return json.dumps(response)
     except Exception as e:
         logger.error(f"Error in eval_ruby: {str(e)}")
-        return json.dumps({
-            "success": False,
-            "error": str(e)
-        })
+        return json.dumps({"success": False, "error": str(e)})
+
 
 @mcp.tool()
-async def eval_ruby(
-    ctx: Context,
-    code: str
-) -> str:
+async def eval_ruby(ctx: Context, code: str) -> str:
     """Evaluate arbitrary Ruby code in this session's leased SketchUp (see
     lease_sketchup)."""
     # In a thread, so the server keeps answering meanwhile, and server_status
     # still gets through.
     return await asyncio.to_thread(_eval_ruby, code, ctx.request_id)
+
 
 def _server_status(request_id) -> str:
     try:
@@ -797,7 +761,7 @@ def _server_status(request_id) -> str:
                 params={"name": "server_status", "arguments": {}},
                 request_id=request_id,
                 timeout=10.0,
-                retries=0
+                retries=0,
             )
         finally:
             sketchup.disconnect()
@@ -808,6 +772,7 @@ def _server_status(request_id) -> str:
         logger.error(f"Error in server_status: {str(e)}")
         return json.dumps({"success": False, "error": str(e)})
 
+
 @mcp.tool()
 async def server_status(ctx: Context) -> str:
     """Say what the SketchUp side of the server is doing: the requests in
@@ -817,7 +782,8 @@ async def server_status(ctx: Context) -> str:
     get a 'busy' error)."""
     return await asyncio.to_thread(_server_status, ctx.request_id)
 
-def _lease_reply(record: Dict[str, Any]) -> Dict[str, Any]:
+
+def _lease_reply(record: dict[str, Any]) -> dict[str, Any]:
     return {
         "success": True,
         "name": record["name"],
@@ -829,13 +795,9 @@ def _lease_reply(record: Dict[str, Any]) -> Dict[str, Any]:
         "message": record["message"],
     }
 
+
 @mcp.tool()
-async def lease_sketchup(
-    ctx: Context,
-    src: str,
-    label: str = None,
-    instance: str = None
-) -> str:
+async def lease_sketchup(ctx: Context, src: str, label: str = None, instance: str = None) -> str:
     """Lease a SketchUp of this session's own from the pool. Call it before
     any other SketchUp tool: with no lease they fail. A session holds one
     SketchUp at a time; leasing again returns the same one.
@@ -863,12 +825,12 @@ async def lease_sketchup(
         return json.dumps({"success": False, "error": no_pool_message()})
     try:
         session, link = session_identity()
-        record = await asyncio.to_thread(
-            launcher.lease, src, session_holder(), label, session, link, instance)
+        record = await asyncio.to_thread(launcher.lease, src, session_holder(), label, session, link, instance)
         return json.dumps(_lease_reply(record))
     except Exception as e:
         logger.error(f"Error in lease_sketchup: {str(e)}")
         return json.dumps({"success": False, "error": str(e)})
+
 
 @mcp.tool()
 async def release_sketchup(ctx: Context) -> str:
@@ -881,16 +843,20 @@ async def release_sketchup(ctx: Context) -> str:
         record = await asyncio.to_thread(launcher.release, session_holder())
         if record is None:
             return json.dumps({"success": False, "error": "This session holds no lease"})
-        return json.dumps({
-            "success": True,
-            "message": f"Released {record['name']} (port {record['port']}); it keeps running.",
-        })
+        return json.dumps(
+            {
+                "success": True,
+                "message": f"Released {record['name']} (port {record['port']}); it keeps running.",
+            }
+        )
     except Exception as e:
         logger.error(f"Error in release_sketchup: {str(e)}")
         return json.dumps({"success": False, "error": str(e)})
 
+
 def main():
     mcp.run()
+
 
 if __name__ == "__main__":
     main()

@@ -31,15 +31,18 @@ class PoolTest(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
         pool = self.dir / "pool"
         pool.mkdir()
-        for name, value in [("POOL_DIR", pool), ("POOL_FILE", pool / "pool.json"),
-                            ("LOCK_FILE", pool / "pool.lock"), ("MODELS_DIR", pool / "models")]:
+        for name, value in [
+            ("POOL_DIR", pool),
+            ("POOL_FILE", pool / "pool.json"),
+            ("LOCK_FILE", pool / "pool.lock"),
+            ("MODELS_DIR", pool / "models"),
+        ]:
             patcher = mock.patch.object(launcher, name, value)
             patcher.start()
             self.addCleanup(patcher.stop)
         # Processes that run, by pid. SketchUps are 100+, holders 1-99.
         self.running = set()
-        for name, fake in [("is_running", lambda pid, started: pid in self.running),
-                           ("switch_src", self.fake_switch)]:
+        for name, fake in [("is_running", lambda pid, started: pid in self.running), ("switch_src", self.fake_switch)]:
             patcher = mock.patch.object(launcher, name, side_effect=fake)
             patcher.start()
             self.addCleanup(patcher.stop)
@@ -67,10 +70,14 @@ class PoolTest(unittest.TestCase):
         """Writes pool.json: one dict per instance, in port order, with its
         pid (running if given), src, lease and last_lease."""
         records = [launcher._blank(port) for port in launcher.PORTS]
-        for r, spec in zip(records, instances):
+        for r, spec in zip(records, instances, strict=False):
             if spec.get("pid"):
-                r.update(pid=spec["pid"], started=float(spec["pid"]), ready=True,
-                         env={"SHELLIFY_SRC": spec.get("src", self.a)})
+                r.update(
+                    pid=spec["pid"],
+                    started=float(spec["pid"]),
+                    ready=True,
+                    env={"SHELLIFY_SRC": spec.get("src", self.a)},
+                )
                 self.running.add(spec["pid"])
             r["lease"] = spec.get("lease")
             r["last_lease"] = spec.get("last_lease")
@@ -81,24 +88,39 @@ class PoolTest(unittest.TestCase):
 
     @staticmethod
     def held(who, label="a session", session=None):
-        return {"holder_pid": who[0], "holder_started": who[1], "label": label, "session": session,
-                "link": None, "leased_at": "2026-11-06T10:00:00+00:00",
-                "last_used": "2026-11-06T10:00:00+00:00"}
+        return {
+            "holder_pid": who[0],
+            "holder_started": who[1],
+            "label": label,
+            "session": session,
+            "link": None,
+            "leased_at": "2026-11-06T10:00:00+00:00",
+            "last_used": "2026-11-06T10:00:00+00:00",
+        }
 
     @staticmethod
     def last(label, session=None):
-        return {"holder_pid": 50, "holder_started": 50.0, "label": label, "session": session,
-                "link": None, "leased_at": "2026-11-06T09:00:00+00:00",
-                "last_used": "2026-11-06T09:30:00+00:00", "released_at": "2026-11-06T09:31:00+00:00"}
+        return {
+            "holder_pid": 50,
+            "holder_started": 50.0,
+            "label": label,
+            "session": session,
+            "link": None,
+            "leased_at": "2026-11-06T09:00:00+00:00",
+            "last_used": "2026-11-06T09:30:00+00:00",
+            "released_at": "2026-11-06T09:31:00+00:00",
+        }
 
 
 class FindTest(PoolTest):
     def setUp(self):
         super().setUp()
-        self.pool({"pid": 101, "last_lease": self.last("Clad the canopy", session="s-1")},
-                  {"pid": 102, "lease": self.held(self.other, "Posts")},
-                  {"pid": 103, "last_lease": self.last("Canopy insets")},
-                  {})
+        self.pool(
+            {"pid": 101, "last_lease": self.last("Clad the canopy", session="s-1")},
+            {"pid": 102, "lease": self.held(self.other, "Posts")},
+            {"pid": 103, "last_lease": self.last("Canopy insets")},
+            {},
+        )
         self.all = launcher._load()
 
     def found(self, instance):
@@ -127,10 +149,13 @@ class FindTest(PoolTest):
             self.found("canopy")
 
     def test_no_match_says_what_the_pool_has(self):
-        with self.assertRaisesRegex(PoolError, 'No pool instance is called "roof".*'
-                                               'sketchup-1 \\(port 9877, free, last used by "Clad the canopy"\\).*'
-                                               'sketchup-2 \\(port 9878, leased to "Posts"\\).*'
-                                               'sketchup-4 \\(port 9880, not running\\)'):
+        with self.assertRaisesRegex(
+            PoolError,
+            'No pool instance is called "roof".*'
+            'sketchup-1 \\(port 9877, free, last used by "Clad the canopy"\\).*'
+            'sketchup-2 \\(port 9878, leased to "Posts"\\).*'
+            "sketchup-4 \\(port 9880, not running\\)",
+        ):
             self.found("roof")
 
 
@@ -160,14 +185,18 @@ class LastLeaseTest(PoolTest):
 
     def test_a_restart_forgets_the_last_lease(self):
         # Its model goes, and with it what the last holder left.
-        self.pool({"pid": 101, "src": self.b, "last_lease": self.last("Canopy")},
-                  {"pid": 102, "lease": self.held(self.other)},
-                  {"pid": 103, "lease": self.held((3, 3.0))},
-                  {"pid": 104, "lease": self.held((4, 4.0))})
+        self.pool(
+            {"pid": 101, "src": self.b, "last_lease": self.last("Canopy")},
+            {"pid": 102, "lease": self.held(self.other)},
+            {"pid": 103, "lease": self.held((3, 3.0))},
+            {"pid": 104, "lease": self.held((4, 4.0))},
+        )
         self.running |= {3, 4}
-        with mock.patch.object(launcher, "_kill"), \
-                mock.patch.object(launcher, "_launch", return_value=(105, 105.0)), \
-                mock.patch.object(launcher, "_wait_ready"):
+        with (
+            mock.patch.object(launcher, "_kill"),
+            mock.patch.object(launcher, "_launch", return_value=(105, 105.0)),
+            mock.patch.object(launcher, "_wait_ready"),
+        ):
             self.running.add(105)
             record = launcher.lease(self.a, self.me, label="New")
         self.assertTrue(record["fresh"])
@@ -267,9 +296,11 @@ class SwitchSrcTest(unittest.TestCase):
                 port, code, _ = ev.call_args.args
                 self.assertEqual(port, 9877)
                 self.assertIn("Shellify.sync('C:/a')", code)
-        for text, message in [('{"old_loader":true}', "dev loader that can't switch"),
-                              ('{"error":"NoMethodError: y"}', "NoMethodError: y"),
-                              ("nonsense", "unexpected reply")]:
+        for text, message in [
+            ('{"old_loader":true}', "dev loader that can't switch"),
+            ('{"error":"NoMethodError: y"}', "NoMethodError: y"),
+            ("nonsense", "unexpected reply"),
+        ]:
             with mock.patch.object(launcher, "eval_ruby", return_value=text):
                 with self.assertRaisesRegex(PoolError, message):
                     launcher.switch_src(9877, "C:/a")

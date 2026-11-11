@@ -68,22 +68,21 @@ MODELS_DIR = POOL_DIR / "models"
 PORTS = [9877, 9878, 9879, 9880]
 HOST = "127.0.0.1"
 
-SKETCHUP_EXE = Path(os.environ.get(
-    "SKETCHUP_EXE", r"C:\Program Files\SketchUp\SketchUp 2026\SketchUp\SketchUp.exe"))
+SKETCHUP_EXE = Path(os.environ.get("SKETCHUP_EXE", r"C:\Program Files\SketchUp\SketchUp 2026\SketchUp\SketchUp.exe"))
 
 # Copied for each instance as it starts. By default an empty model shipped
 # with the package, so a fresh instance has nothing in it but what its
 # session builds: SketchUp 2026's Simple template (architectural inches)
 # with its scale figure and the figure's materials removed.
-TEMPLATE = Path(os.environ.get(
-    "SKETCHUP_POOL_TEMPLATE", str(Path(__file__).with_name("empty.skp"))))
+TEMPLATE = Path(os.environ.get("SKETCHUP_POOL_TEMPLATE", str(Path(__file__).with_name("empty.skp"))))
 
 # SketchUp 2026 autosaves to this folder, keyed by the model's file name
 # only, and after a crash asks whether to open the "recovered version"
 # before its extensions load, so nothing answers on the port. The model
 # copy's file there is deleted before every start.
-AUTOSAVE_DIR = (Path(os.environ.get("LOCALAPPDATA", str(Path.home())))
-                / "SketchUp" / "SketchUp 2026" / "SketchUp" / "working")
+AUTOSAVE_DIR = (
+    Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "SketchUp" / "SketchUp 2026" / "SketchUp" / "working"
+)
 
 # How long a start may take before the lease gives up. SketchUp listens about
 # 10-15 s after launch when it's alone; four starting at once take longer.
@@ -219,8 +218,9 @@ def user_environment():
     variables (the Python SDK's stdio client passes about a dozen), and
     SketchUp started with those hangs before showing its window."""
     token = wintypes.HANDLE()
-    if not _advapi32.OpenProcessToken(_kernel32.GetCurrentProcess(), TOKEN_QUERY | TOKEN_DUPLICATE,
-                                      ctypes.byref(token)):
+    if not _advapi32.OpenProcessToken(
+        _kernel32.GetCurrentProcess(), TOKEN_QUERY | TOKEN_DUPLICATE, ctypes.byref(token)
+    ):
         raise ctypes.WinError(ctypes.get_last_error())
     block = ctypes.c_void_p()
     try:
@@ -259,6 +259,7 @@ def _kill(pid, started):
 
 # --- The pool's state --------------------------------------------------------
 
+
 @contextmanager
 def _locked():
     """Holds the pool's lock file, so one process at a time reads and writes
@@ -291,10 +292,18 @@ def _ensure_pool_dir():
         return
     path = str(POOL_DIR).replace("'", "''")
     subprocess.run(
-        ["powershell", "-NoProfile", "-NonInteractive", "-Command",
-         "Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments "
-         f"@{{ CommandLine = 'cmd /c mkdir \"{path}\"' }} | Out-Null"],
-        stdin=subprocess.DEVNULL, capture_output=True, timeout=60)
+        [
+            "powershell",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments "
+            f"@{{ CommandLine = 'cmd /c mkdir \"{path}\"' }} | Out-Null",
+        ],
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        timeout=60,
+    )
     deadline = time.time() + 10
     while not POOL_DIR.is_dir() and time.time() < deadline:
         time.sleep(0.2)
@@ -386,7 +395,8 @@ def check_src(src):
     if not src or not str(src).strip():
         raise PoolError(
             "src is required: the folder you work in (your worktree, or ~/source/shellify "
-            "if you work in the main checkout)")
+            "if you work in the main checkout)"
+        )
     folder = normalize_src(str(src).strip())
     if not os.path.isdir(folder):
         raise PoolError(f"src isn't an existing folder: {folder}")
@@ -403,15 +413,22 @@ def _same_src(a, b):
 
 # --- Starting SketchUp -------------------------------------------------------
 
+
 def _delete_autosave(model):
     """Deletes the model copy's autosave, so SketchUp doesn't stop at the
     "recovered version" dialog. -LiteralPath, so the name isn't a pattern.
     Run by spawn, outside the package, so it's SketchUp's real file."""
     path = str(AUTOSAVE_DIR / Path(model).name).replace("'", "''")
     subprocess.run(
-        ["powershell", "-NoProfile", "-NonInteractive", "-Command",
-         f"Remove-Item -LiteralPath '{path}' -Force -ErrorAction SilentlyContinue"],
-        stdin=subprocess.DEVNULL, capture_output=True,
+        [
+            "powershell",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            f"Remove-Item -LiteralPath '{path}' -Force -ErrorAction SilentlyContinue",
+        ],
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
     )
 
 
@@ -448,14 +465,22 @@ def _launch(r, src):
     request = POOL_DIR / f"start-{r['name']}.json"
     result = POOL_DIR / f"started-{r['name']}.json"
     result.unlink(missing_ok=True)
-    request.write_text(json.dumps({
-        "exe": str(SKETCHUP_EXE), "template": str(TEMPLATE), "model": r["model"],
-        "port": r["port"], "src": src, "result": str(result),
-    }), encoding="utf-8")
+    request.write_text(
+        json.dumps(
+            {
+                "exe": str(SKETCHUP_EXE),
+                "template": str(TEMPLATE),
+                "model": r["model"],
+                "port": r["port"],
+                "src": src,
+                "result": str(result),
+            }
+        ),
+        encoding="utf-8",
+    )
     task = f"SketchUp pool {r['name']}"
     _create_task(task, request)
-    done = subprocess.run(["schtasks", "/run", "/tn", task],
-                          stdin=subprocess.DEVNULL, capture_output=True, text=True)
+    done = subprocess.run(["schtasks", "/run", "/tn", task], stdin=subprocess.DEVNULL, capture_output=True, text=True)
     if done.returncode != 0:
         raise PoolError(f"Running the task '{task}' failed: {done.stdout.strip()} {done.stderr.strip()}")
     deadline = time.time() + 60
@@ -496,8 +521,12 @@ def _create_task(task, request):
     path = POOL_DIR / f"{task}.xml"
     path.write_text(xml, encoding="utf-16")
     try:
-        done = subprocess.run(["schtasks", "/create", "/tn", task, "/xml", str(path), "/f"],
-                              stdin=subprocess.DEVNULL, capture_output=True, text=True)
+        done = subprocess.run(
+            ["schtasks", "/create", "/tn", task, "/xml", str(path), "/f"],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+        )
     finally:
         path.unlink(missing_ok=True)
     if done.returncode != 0:
@@ -521,9 +550,11 @@ def spawn(request):
         model.with_suffix(".skb").unlink(missing_ok=True)
         # The user's own environment, with this instance's port and source.
         # Names are case-insensitive on Windows; drop any spelling of these.
-        env = {k: v for k, v in user_environment().items()
-               if k.upper() not in ("SKETCHUP_MCP_PORT", "SKETCHUP_MCP_BIND", "SHELLIFY_SRC",
-                                    "SKETCHUP_MCP_POOL_FILE")}
+        env = {
+            k: v
+            for k, v in user_environment().items()
+            if k.upper() not in ("SKETCHUP_MCP_PORT", "SKETCHUP_MCP_BIND", "SHELLIFY_SRC", "SKETCHUP_MCP_POOL_FILE")
+        }
         env["SKETCHUP_MCP_PORT"] = str(req["port"])
         # Where the extension reads its lease, for its badge in the viewport.
         env["SKETCHUP_MCP_POOL_FILE"] = str(POOL_FILE)
@@ -535,13 +566,21 @@ def spawn(request):
         startup = subprocess.STARTUPINFO()
         startup.dwFlags = subprocess.STARTF_USESHOWWINDOW
         startup.wShowWindow = 4  # SW_SHOWNOACTIVATE
-        args = dict(env=env, cwd=str(Path(req["exe"]).parent), startupinfo=startup, close_fds=True,
-                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        args = dict(
+            env=env,
+            cwd=str(Path(req["exe"]).parent),
+            startupinfo=startup,
+            close_fds=True,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
         flags = subprocess.CREATE_NEW_PROCESS_GROUP
         try:
             # Out of the task's job too, where it allows that.
-            proc = subprocess.Popen([req["exe"], req["model"]],
-                                    creationflags=flags | subprocess.CREATE_BREAKAWAY_FROM_JOB, **args)
+            proc = subprocess.Popen(
+                [req["exe"], req["model"]], creationflags=flags | subprocess.CREATE_BREAKAWAY_FROM_JOB, **args
+            )
         except OSError:
             proc = subprocess.Popen([req["exe"], req["model"]], creationflags=flags, **args)
         started = process_started(proc.pid)
@@ -559,8 +598,12 @@ def eval_ruby(port, code, timeout=5.0):
     """Runs code in the SketchUp on port through the extension's eval_ruby,
     the way the MCP server sends a request (one line of JSON each way), and
     returns its result as text."""
-    request = {"jsonrpc": "2.0", "method": "tools/call", "id": 1,
-               "params": {"name": "eval_ruby", "arguments": {"code": code}}}
+    request = {
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "id": 1,
+        "params": {"name": "eval_ruby", "arguments": {"code": code}},
+    }
     with socket.create_connection((HOST, port), timeout=timeout) as sock:
         sock.settimeout(timeout)
         sock.sendall(json.dumps(request).encode("utf-8") + b"\n")
@@ -621,7 +664,8 @@ end"""
         raise PoolError(
             "its SketchUp runs a Shellify dev loader that can't switch folders (it has no "
             "Shellify.dev_src). Copy dev/shellify_dev.rb from the repository into SketchUp's "
-            "Plugins folder: SketchUps started after that can switch.")
+            "Plugins folder: SketchUps started after that can switch."
+        )
     if "src" not in reply:
         raise PoolError(f"switching to {src} failed: {reply.get('error')}")
     return reply["src"], reply.get("error")
@@ -634,7 +678,8 @@ def _wait_ready(r):
         if not _alive(r):
             raise PoolError(
                 f"{r['name']}'s SketchUp (pid {r['pid']}) exited while starting. Its log is "
-                "entlog-sketchup.txt in %LOCALAPPDATA%\\SketchUp\\SketchUp 2026.")
+                "entlog-sketchup.txt in %LOCALAPPDATA%\\SketchUp\\SketchUp 2026."
+            )
         try:
             pid = ask_pid(r["port"])
             if pid == r["pid"]:
@@ -644,10 +689,12 @@ def _wait_ready(r):
             time.sleep(1)
     raise PoolError(
         f"{r['name']}'s SketchUp (pid {r['pid']}) didn't answer on port {r['port']} within "
-        f"{START_TIMEOUT:g} s. It may be stopped at a dialog.")
+        f"{START_TIMEOUT:g} s. It may be stopped at a dialog."
+    )
 
 
 # --- Leasing -----------------------------------------------------------------
+
 
 def _pick(records, src):
     """The free instance a lease should take, and whether it needs starting:
@@ -669,7 +716,8 @@ def _busy_message(records):
     held = ", ".join(
         f"{r['name']} ({r['lease'].get('label') or 'holder pid ' + str(r['lease']['holder_pid'])}, "
         f"last used {r['lease']['last_used']})"
-        for r in records)
+        for r in records
+    )
     return f"All {len(records)} pool instances are leased: {held}. Wait for one to be released."
 
 
@@ -710,8 +758,9 @@ def find(records, instance):
     def label(lease):
         return (lease.get("label") or "").strip().lower()
 
-    matches = [r for r in records
-               if any(text == lease.get("session") or text.lower() == label(lease) for lease in leases(r))]
+    matches = [
+        r for r in records if any(text == lease.get("session") or text.lower() == label(lease) for lease in leases(r))
+    ]
     if not matches:
         matches = [r for r in records if any(text.lower() in label(lease) for lease in leases(r))]
     if len(matches) == 1:
@@ -719,10 +768,12 @@ def find(records, instance):
     if not matches:
         raise PoolError(
             f'No pool instance is called "{text}", nor was used by a session called that (an '
-            f"instance that's been restarted since forgets who used it). The pool: {_describe(records)}.")
+            f"instance that's been restarted since forgets who used it). The pool: {_describe(records)}."
+        )
     raise PoolError(
         f'More than one pool instance was used by a session called "{text}": '
-        f"{_describe(matches)}. Name one of them (sketchup-N).")
+        f"{_describe(matches)}. Name one of them (sketchup-N)."
+    )
 
 
 def lease(src, who=None, label=None, session=None, link=None, instance=None):
@@ -771,8 +822,15 @@ def lease(src, who=None, label=None, session=None, link=None, instance=None):
         if r is None:
             _save(records)
             raise PoolError(_busy_message(records))
-        r["lease"] = {"holder_pid": who[0], "holder_started": who[1], "label": label,
-                      "session": session, "link": link, "leased_at": now, "last_used": now}
+        r["lease"] = {
+            "holder_pid": who[0],
+            "holder_started": who[1],
+            "label": label,
+            "session": session,
+            "link": link,
+            "leased_at": now,
+            "last_used": now,
+        }
         if start:
             # Reserved under the lock; started outside it. Its model goes,
             # and with it what the last holder left.
@@ -782,9 +840,14 @@ def lease(src, who=None, label=None, session=None, link=None, instance=None):
         _save(records)
 
     if not start:
-        return dict(r, fresh=False, message=(
-            f"Leased {r['name']} on port {r['port']}, already running on this source. Its model "
-            "is as the last holder left it, and code it loaded is still loaded; call Shellify.sync."))
+        return dict(
+            r,
+            fresh=False,
+            message=(
+                f"Leased {r['name']} on port {r['port']}, already running on this source. Its model "
+                "is as the last holder left it, and code it loaded is still loaded; call Shellify.sync."
+            ),
+        )
 
     try:
         _kill(*old)
@@ -812,9 +875,14 @@ def lease(src, who=None, label=None, session=None, link=None, instance=None):
         rec = next(x for x in records if x["port"] == r["port"])
         rec["ready"] = True
         _save(records)
-    return dict(rec, fresh=True, message=(
-        f"Leased {rec['name']} on port {rec['port']}: SketchUp started fresh (pid {rec['pid']}) on a "
-        f"new copy of the template model, loading Shellify from {src}."))
+    return dict(
+        rec,
+        fresh=True,
+        message=(
+            f"Leased {rec['name']} on port {rec['port']}: SketchUp started fresh (pid {rec['pid']}) on a "
+            f"new copy of the template model, loading Shellify from {src}."
+        ),
+    )
 
 
 def _lease_named(src, who, label, session, link, instance):
@@ -830,19 +898,26 @@ def _lease_named(src, who, label, session, link, instance):
             raise PoolError(
                 f"{r['name']} is leased to {_who_held(r['lease'])} (since {r['lease']['leased_at']}), "
                 "and an instance is leased by name only when it's free: ask that session to "
-                "release it (release_sketchup), then lease it again.")
+                "release it (release_sketchup), then lease it again."
+            )
         if not (_alive(r) and r["ready"]):
             _save(records)
             raise PoolError(
                 f"{r['name']}'s SketchUp isn't running, so there's no model in it to go on with. "
-                "Lease without naming an instance to get a fresh one.")
+                "Lease without naming an instance to get a fresh one."
+            )
         for x in records:
             if x is not r and _held_by(x["lease"], who):
                 _free(x, now)
-        r["lease"] = {"holder_pid": who[0], "holder_started": who[1],
-                      "label": label or (mine or {}).get("label"),
-                      "session": session, "link": link,
-                      "leased_at": mine["leased_at"] if mine else now, "last_used": now}
+        r["lease"] = {
+            "holder_pid": who[0],
+            "holder_started": who[1],
+            "label": label or (mine or {}).get("label"),
+            "session": session,
+            "link": link,
+            "leased_at": mine["leased_at"] if mine else now,
+            "last_used": now,
+        }
         before = r.get("last_lease")
         old_src = (r["env"] or {}).get("SHELLIFY_SRC")
         _save(records)
@@ -854,9 +929,14 @@ def _lease_named(src, who, label, session, link, instance):
     else:
         left = "as its last holder left it"
     if _same_src(old_src, src):
-        return dict(r, fresh=False, message=(
-            f"Leased {r['name']} on port {r['port']}, {left}: its model is kept, and it already "
-            "loads Shellify from this source. Call Shellify.sync."))
+        return dict(
+            r,
+            fresh=False,
+            message=(
+                f"Leased {r['name']} on port {r['port']}, {left}: its model is kept, and it already "
+                "loads Shellify from this source. Call Shellify.sync."
+            ),
+        )
 
     try:
         now_src, error = switch_src(r["port"], src)
@@ -879,10 +959,16 @@ def _lease_named(src, who, label, session, link, instance):
     if error:
         raise PoolError(
             f"Switching {r['name']} to {src} failed while reloading Shellify, so it isn't leased: "
-            f"{error}. Its model is kept; fix the code and lease it again.")
-    return dict(rec, fresh=False, message=(
-        f"Leased {rec['name']} on port {rec['port']}, {left}: its model is kept. It loaded "
-        f"Shellify from {old_src}; now it loads from {src} (reloaded with Shellify.sync)."))
+            f"{error}. Its model is kept; fix the code and lease it again."
+        )
+    return dict(
+        rec,
+        fresh=False,
+        message=(
+            f"Leased {rec['name']} on port {rec['port']}, {left}: its model is kept. It loaded "
+            f"Shellify from {old_src}; now it loads from {src} (reloaded with Shellify.sync)."
+        ),
+    )
 
 
 def release(who=None):
@@ -927,20 +1013,23 @@ def status():
 
 # --- CLI ---------------------------------------------------------------------
 
+
 def main(argv=None):
     parser = argparse.ArgumentParser(
         prog="sketchup-launcher",
         description="Lease a SketchUp from the pool. A lease belongs to the shell that ran "
-                    "this, unless --holder names another process, and each holder has one.")
+        "this, unless --holder names another process, and each holder has one.",
+    )
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("status", help="show the pool")
     p = sub.add_parser("lease", help="lease an instance, starting it if need be")
-    p.add_argument("--src", required=True,
-                   help="the Shellify source folder you work in (it must have shellify.rb)")
+    p.add_argument("--src", required=True, help="the Shellify source folder you work in (it must have shellify.rb)")
     p.add_argument("--label", help="what it's for, shown in SketchUp's viewport")
-    p.add_argument("--instance",
-                   help="the free instance to lease, model and all: its name (sketchup-2), port, "
-                        "or the label of the session that last used it")
+    p.add_argument(
+        "--instance",
+        help="the free instance to lease, model and all: its name (sketchup-2), port, "
+        "or the label of the session that last used it",
+    )
     p.add_argument("--holder", type=int, help="pid of the process the lease belongs to")
     p = sub.add_parser("release", help="release the lease; SketchUp keeps running")
     p.add_argument("--holder", type=int)
