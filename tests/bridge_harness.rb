@@ -21,14 +21,16 @@ SKETCHUP_CONSOLE = console
 
 def file_loaded?(*) = true
 def file_loaded(*) = nil
-module Sketchup; end
+module Sketchup
+  class AppObserver; end
+end
 $LOADED_FEATURES << 'sketchup.rb'
 
 load ARGV.fetch(0)
 
 # Short limits so the test runs in seconds.
-SU_MCP::Server.send(:remove_const, :IDLE_TIMEOUT)
-SU_MCP::Server.const_set(:IDLE_TIMEOUT, 0.5)
+SU_MCP::Server.send(:remove_const, :WRITE_TIMEOUT)
+SU_MCP::Server.const_set(:WRITE_TIMEOUT, 0.5)
 SU_MCP::Server.send(:remove_const, :MAX_REQUEST_BYTES)
 SU_MCP::Server.const_set(:MAX_REQUEST_BYTES, 4096)
 
@@ -65,8 +67,18 @@ def reply_for(server, client, within: 3)
   buffer
 end
 
+def text_of(reply)
+  reply.empty? ? nil : JSON.parse(reply).dig('result', 'content', 0, 'text')
+end
+
+# Reads past anything the server sent (an error reply, say) to see whether
+# the connection has been closed.
 def closed_by_server?(client)
-  client.read_nonblock(1, exception: false).nil?
+  loop do
+    chunk = client.read_nonblock(65_536, exception: false)
+    return true if chunk.nil?
+    return false if chunk == :wait_readable
+  end
 rescue StandardError
   true
 end
@@ -79,60 +91,63 @@ def run_until(server, seconds)
   end
 end
 
+def clients(server) = server.instance_variable_get(:@clients)
+
 out = {}
 
-# 1. A client that connects and says nothing must not hold up the next one.
+# 1. A client that connects and says nothing must not hold up the next one,
+#    and a client keeps its connection for further requests (the MCP server
+#    sends a whole session's requests down one socket).
 silent = TCPSocket.new('127.0.0.1', PORT)
 good = TCPSocket.new('127.0.0.1', PORT)
 good.write(request('6 * 7'))
-reply = reply_for(server, good)
-out['served_while_silent_waits'] = reply.empty? ? nil : JSON.parse(reply).dig('result', 'content', 0, 'text')
-out['good_closed_after_reply'] = closed_by_server?(good)
+out['served_while_silent_waits'] = text_of(reply_for(server, good))
+good.write(request('2 + 3', id: 2))
+out['second_request_on_same_socket'] = text_of(reply_for(server, good))
 
-# 2. The silent client is dropped after the idle timeout; so is half a request.
-partial = TCPSocket.new('127.0.0.1', PORT)
-partial.write('{"jsonrpc":"2.0"')
-run_until(server, 1.0)
-out['silent_dropped'] = closed_by_server?(silent)
-out['partial_dropped'] = closed_by_server?(partial)
-
-# 3. A client still sending is not dropped: arriving bytes push the deadline back.
+# 2. A client still sending is served once its request is complete.
 slow = TCPSocket.new('127.0.0.1', PORT)
 line = request('1 + 1')
 line.each_char.each_slice(8) do |piece|
   slow.write(piece.join)
-  run_until(server, 0.1)
+  run_until(server, 0.05)
 end
-reply = reply_for(server, slow)
-out['slow_sender_served'] = reply.empty? ? nil : JSON.parse(reply).dig('result', 'content', 0, 'text')
+out['slow_sender_served'] = text_of(reply_for(server, slow))
 
-# 4. A syntax error in eval still gets an answer, and the socket is closed.
+# 3. A syntax error in eval still gets an answer, and the socket stays usable.
 broken = TCPSocket.new('127.0.0.1', PORT)
 broken.write(request('def x('))
-reply = reply_for(server, broken)
-parsed = reply.empty? ? {} : JSON.parse(reply)
+parsed = reply_for(server, broken).then { |r| r.empty? ? {} : JSON.parse(r) }
 out['syntax_error_answered'] = !parsed['error'].nil?
-out['syntax_error_closed'] = closed_by_server?(broken)
+broken.write(request(':ok', id: 3))
+out['usable_after_syntax_error'] = text_of(reply_for(server, broken))
 
-# 5. An oversized request is dropped.
+# 4. An oversized request is dropped.
 big = TCPSocket.new('127.0.0.1', PORT)
 big.write('x' * 10_000)
 run_until(server, 0.3)
 out['oversized_dropped'] = closed_by_server?(big)
 
-# 6. A client that never reads a large reply cannot block a tick, and is dropped.
+# 5. A client that never reads a large reply cannot block a tick, and is dropped.
 stuck = TCPSocket.new('127.0.0.1', PORT)
 stuck.setsockopt(Socket::SOL_SOCKET, Socket::SO_RCVBUF, 4096)
 stuck.write(request('"x" * 20_000_000'))
 # Building the 20 MB reply is the command's own cost; what must stay fast is
 # every tick after it, while the reply sits unread.
-tick(server) until server.instance_variable_get(:@outgoing).any?
+tick(server) until clients(server).any? { |c| !c[:out].empty? }
 $ticks.clear
 run_until(server, 1.5)
 out['slowest_tick_ms_with_stuck_reader'] = ($ticks.max * 1000).round(1)
-out['stuck_reader_dropped'] = server.instance_variable_get(:@outgoing).empty?
+out['stuck_reader_dropped'] = clients(server).none? { |c| !c[:out].empty? }
 
-# 7. Afterwards nothing is left pending.
-out['pending_left'] = server.instance_variable_get(:@pending).size
+# 6. Clients that hang up are let go: one request per connection, as the
+#    AutoClad scenario runner sends them, leaves nothing behind.
+[silent, good, slow, broken, stuck].each { |s| s.close rescue nil }
+once = TCPSocket.new('127.0.0.1', PORT)
+once.write(request('"once"'))
+out['one_shot_served'] = text_of(reply_for(server, once))
+once.close
+run_until(server, 0.3)
+out['clients_left'] = clients(server).size
 server.stop
 puts JSON.generate(out)

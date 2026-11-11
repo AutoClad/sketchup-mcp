@@ -1,5 +1,6 @@
 """MCP tool functions, with the SketchUp connection replaced by a stub."""
 
+import asyncio
 import json
 from dataclasses import dataclass
 
@@ -17,8 +18,8 @@ class StubConnection:
         self.error = error
         self.calls = []
 
-    def send_command(self, method, params=None, request_id=None):
-        self.calls.append({"method": method, "params": params, "request_id": request_id})
+    def send_command(self, method, params=None, request_id=None, **options):
+        self.calls.append({"method": method, "params": params, "request_id": request_id, **options})
         if self.error:
             raise Exception(self.error)
         return self.result
@@ -29,12 +30,14 @@ def test_eval_ruby_sends_code_and_returns_result(monkeypatch):
     stub = StubConnection(result={"content": [{"type": "text", "text": "2"}]})
     monkeypatch.setattr(server, "get_sketchup_connection", lambda: stub)
 
-    out = json.loads(server.eval_ruby(FakeContext(), "1 + 1"))
+    out = json.loads(asyncio.run(server.eval_ruby(FakeContext(), "1 + 1")))
 
     (call,) = stub.calls
     assert call["method"] == "tools/call"
     assert call["params"] == {"name": "eval_ruby", "arguments": {"code": "1 + 1"}}
     assert call["request_id"] == 42
+    # Ruby isn't idempotent: a timed-out eval may have run, so it's never resent.
+    assert call["retries"] == 0
     assert out["success"] is True
     assert out["result"] == "2"
 
@@ -43,7 +46,7 @@ def test_eval_ruby_without_content_reports_success(monkeypatch):
     stub = StubConnection(result={})
     monkeypatch.setattr(server, "get_sketchup_connection", lambda: stub)
 
-    out = json.loads(server.eval_ruby(FakeContext(), "nil"))
+    out = json.loads(asyncio.run(server.eval_ruby(FakeContext(), "nil")))
 
     assert out == {"success": True, "result": "Success"}
 
@@ -52,7 +55,7 @@ def test_eval_ruby_reports_errors_instead_of_raising(monkeypatch):
     stub = StubConnection(error="NameError: undefined local variable")
     monkeypatch.setattr(server, "get_sketchup_connection", lambda: stub)
 
-    out = json.loads(server.eval_ruby(FakeContext(), "nope"))
+    out = json.loads(asyncio.run(server.eval_ruby(FakeContext(), "nope")))
 
     assert out["success"] is False
     assert "NameError" in out["error"]
