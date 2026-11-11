@@ -110,13 +110,15 @@ folder. The template is an empty model shipped with the package
 (`src/sketchup_mcp/empty.skp`: SketchUp 2026's Simple template, in
 architectural inches, with its scale figure removed), unless
 `SKETCHUP_POOL_TEMPLATE` names another. The source folder is the lease's `src`,
-passed to Shellify's dev loader as `SHELLIFY_SRC`. The server's
+passed to the extension's dev loader: `SHELLIFY_SRC` for a Shellify folder
+(one with `shellify.rb`), `AUTOCLAD_SRC` for AutoClad's `src` folder (one with
+`autoclad.rb`). The server's
 instructions tell every session these rules.
 
 * `lease_sketchup(src, label)` leases one. `src` is required, with no
   default: the folder the session works in (its worktree, or the main
   checkout). A lease is refused at once if it's missing, isn't an existing
-  folder, or has no `shellify.rb` in it. A lease prefers a free instance
+  folder, or has neither `shellify.rb` nor `autoclad.rb` in it. A lease prefers a free instance
   already running on `src`, and otherwise starts or restarts one on a fresh
   copy of the template. Its reply says which (`fresh`). Every tool goes to the
   leased SketchUp, and fails until there is one. A session holds one at a
@@ -126,8 +128,10 @@ instructions tell every session these rules.
   (`sketchup-2`), its port, or the label or session id of the session that
   holds or last held it (each instance keeps its last lease, `last_lease`,
   until it restarts). It's leased only if it's free and running, and never
-  restarted. If it runs another `src`, Shellify's dev loader reloads from
-  the new one (`Shellify.sync(src)`, through `eval_ruby`), keeping the model.
+  restarted. If it runs another Shellify `src`, Shellify's dev loader reloads
+  from the new one (`Shellify.sync(src)`, through `eval_ruby`), keeping the
+  model. AutoClad's dev loader can't switch folders, so an AutoClad instance
+  is leased by name only with the folder it runs.
 * `release_sketchup()` frees it, as soon as the task is done; SketchUp keeps
   running. A lease also ends when its MCP server exits.
 * If a leased SketchUp dies, the next call runs nothing, leases again on

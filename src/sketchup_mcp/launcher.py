@@ -4,7 +4,8 @@ Several Claude sessions on one machine can each drive a SketchUp of their
 own. The pool has a fixed set of instances, each on its own MCP port
 (SKETCHUP_MCP_PORT, which the extension reads) with its own copy of a
 template model and its own source folder: the src its lease names, which
-it passes to Shellify's dev loader as SHELLIFY_SRC. A lease must name src;
+it passes to that extension's dev loader (SHELLIFY_SRC for a Shellify
+folder, AUTOCLAD_SRC for AutoClad's; see SOURCES). A lease must name src;
 there's no default, so a session never gets another folder's code by
 accident. A session leases one, its tool calls go to that port, and when
 it releases it the instance keeps running for the next one.
@@ -22,13 +23,15 @@ pool.json too, and shows a badge in the viewport while it's leased.
 
 Nothing is stopped for being idle. An instance is started, or restarted, only
 when a lease needs it: its SketchUp has died, never ran, or was started with
-another SHELLIFY_SRC. The user's own SketchUp, on 9876, is never touched.
+another source folder. The user's own SketchUp, on 9876, is never touched.
 
 A lease can also name an instance, to go on with what another session left
 in its model: by its name, its port, or the session that last held it, which
 is kept (last_lease) until its SketchUp restarts. It's leased only if it's
-free, and never restarted: if it runs another source folder, the dev loader
-reloads Shellify from the new one (Shellify.sync(src)), keeping the model.
+free, and never restarted: if it runs another Shellify folder, the dev
+loader reloads Shellify from the new one (Shellify.sync(src)), keeping the
+model. AutoClad's dev loader can't switch folders, so a named lease of an
+AutoClad instance needs the folder it already runs.
 
 The Claude desktop app is a packaged (MSIX) app, so the processes it starts,
 MCP servers included, see %LOCALAPPDATA% virtualized: a folder they create
@@ -387,11 +390,49 @@ def normalize_src(src):
     return os.path.abspath(os.path.expanduser(src)).replace("\\", "/").rstrip("/")
 
 
+# The extensions a pool instance can load from a source folder: the file
+# that marks a folder as the extension's, the environment variable its dev
+# loader reads the folder from, its name, and how to reload its code in a
+# running SketchUp. A folder is the first one's whose file it has.
+SOURCES = [
+    ("shellify.rb", "SHELLIFY_SRC", "Shellify", "call Shellify.sync"),
+    ("autoclad.rb", "AUTOCLAD_SRC", "AutoClad", "call AutoClad::SketchUpUI::Dev.reload"),
+]
+SOURCE_VARS = tuple(var for _, var, _, _ in SOURCES)
+
+
+def source_of(folder):
+    """The SOURCES entry of the extension whose source folder this is, or None."""
+    if not folder:
+        return None
+    for entry in SOURCES:
+        if os.path.isfile(os.path.join(folder, entry[0])):
+            return entry
+    return None
+
+
+def record_src(r):
+    """The source folder an instance runs, or None."""
+    env = r.get("env") or {}
+    return next((env[var] for var in SOURCE_VARS if env.get(var)), None)
+
+
+def _src_env(src):
+    """An instance's env record for src."""
+    return {source_of(src)[1]: src}
+
+
+def _reload_hint(src):
+    entry = source_of(src)
+    return entry[3] if entry else "reload its code"
+
+
 def check_src(src):
-    """src, normalized, if it's a Shellify source folder: one that exists and
-    has shellify.rb in it, as the dev loader needs. Refuses anything else at
-    once, so a typo or the wrong folder fails here rather than starting a
-    SketchUp that can't load Shellify."""
+    """src, normalized, if it's an extension's source folder: one that
+    exists and has one of SOURCES' files in it (shellify.rb, or autoclad.rb
+    in AutoClad's src folder), as its dev loader needs. Refuses anything else
+    at once, so a typo or the wrong folder fails here rather than starting a
+    SketchUp that can't load the extension."""
     if not src or not str(src).strip():
         raise PoolError(
             "src is required: the folder you work in (your worktree, or ~/source/shellify "
@@ -400,8 +441,9 @@ def check_src(src):
     folder = normalize_src(str(src).strip())
     if not os.path.isdir(folder):
         raise PoolError(f"src isn't an existing folder: {folder}")
-    if not os.path.isfile(os.path.join(folder, "shellify.rb")):
-        raise PoolError(f"src has no shellify.rb, so it isn't a Shellify source folder: {folder}")
+    if source_of(folder) is None:
+        files = " or ".join(f for f, _, _, _ in SOURCES)
+        raise PoolError(f"src has no {files}, so it isn't an extension's source folder: {folder}")
     return folder
 
 
@@ -553,13 +595,13 @@ def spawn(request):
         env = {
             k: v
             for k, v in user_environment().items()
-            if k.upper() not in ("SKETCHUP_MCP_PORT", "SKETCHUP_MCP_BIND", "SHELLIFY_SRC", "SKETCHUP_MCP_POOL_FILE")
+            if k.upper() not in ("SKETCHUP_MCP_PORT", "SKETCHUP_MCP_BIND", "SKETCHUP_MCP_POOL_FILE") + SOURCE_VARS
         }
         env["SKETCHUP_MCP_PORT"] = str(req["port"])
         # Where the extension reads its lease, for its badge in the viewport.
         env["SKETCHUP_MCP_POOL_FILE"] = str(POOL_FILE)
         if req["src"]:
-            env["SHELLIFY_SRC"] = req["src"]
+            env.update(_src_env(req["src"]))
         # Shown without taking the focus from whatever the user is doing.
         # Never minimized: SketchUp draws and picks only in a window that's
         # shown.
@@ -702,7 +744,7 @@ def _pick(records, src):
     one, restarted on src."""
     free = [r for r in records if not r["lease"]]
     for r in free:
-        if _alive(r) and r["ready"] and _same_src((r["env"] or {}).get("SHELLIFY_SRC"), src):
+        if _alive(r) and r["ready"] and _same_src(record_src(r), src):
             return r, False
     for r in free:
         if not _alive(r):
@@ -788,17 +830,17 @@ def lease(src, who=None, label=None, session=None, link=None, instance=None):
     holds, unless its SketchUp has died or runs another src, when it's
     replaced.
 
-    src is required: the Shellify source folder the holder works in (a
+    src is required: the extension's source folder the holder works in (a
     session's worktree, or the main checkout), which must exist and have
-    shellify.rb in it (see check_src). label (what the holder is doing, such
+    shellify.rb or autoclad.rb in it (see check_src). label (what the holder is doing, such
     as a session's title), session (the Claude desktop app's id for it) and
     link (a URL that opens it) are recorded with the lease, for the badge the
     extension shows in a leased SketchUp's viewport.
 
     instance names the one to lease (see find), to go on with what's in its
     model: it's leased only if it's free and running, and never restarted.
-    If it runs another src, its Shellify is reloaded from src (see
-    switch_src).
+    If it runs another Shellify src, its Shellify is reloaded from src (see
+    switch_src); other switches are refused.
     """
     src = check_src(src)
     who = who or holder()
@@ -810,7 +852,7 @@ def lease(src, who=None, label=None, session=None, link=None, instance=None):
         _reap(records)
         for r in records:
             if _held_by(r["lease"], who):
-                if _alive(r) and r["ready"] and _same_src((r["env"] or {}).get("SHELLIFY_SRC"), src):
+                if _alive(r) and r["ready"] and _same_src(record_src(r), src):
                     r["lease"].update(last_used=now, label=label or r["lease"].get("label"))
                     _save(records)
                     return dict(r, fresh=False, message=f"Already leased {r['name']} on port {r['port']}.")
@@ -845,7 +887,7 @@ def lease(src, who=None, label=None, session=None, link=None, instance=None):
             fresh=False,
             message=(
                 f"Leased {r['name']} on port {r['port']}, already running on this source. Its model "
-                "is as the last holder left it, and code it loaded is still loaded; call Shellify.sync."
+                f"is as the last holder left it, and code it loaded is still loaded; {_reload_hint(src)}."
             ),
         )
 
@@ -855,7 +897,7 @@ def lease(src, who=None, label=None, session=None, link=None, instance=None):
         with _locked():
             records = _load()
             rec = next(x for x in records if x["port"] == r["port"])
-            rec.update(pid=pid, started=started, env={"SHELLIFY_SRC": src}, ready=False)
+            rec.update(pid=pid, started=started, env=_src_env(src), ready=False)
             _save(records)
         r = rec
         _wait_ready(r)
@@ -880,7 +922,7 @@ def lease(src, who=None, label=None, session=None, link=None, instance=None):
         fresh=True,
         message=(
             f"Leased {rec['name']} on port {rec['port']}: SketchUp started fresh (pid {rec['pid']}) on a "
-            f"new copy of the template model, loading Shellify from {src}."
+            f"new copy of the template model, loading {source_of(src)[2]} from {src}."
         ),
     )
 
@@ -919,7 +961,9 @@ def _lease_named(src, who, label, session, link, instance):
             "last_used": now,
         }
         before = r.get("last_lease")
-        old_src = (r["env"] or {}).get("SHELLIFY_SRC")
+        old_src = record_src(r)
+        # Which extension it runs: from its record, since old_src may be gone.
+        old_shellify = bool((r["env"] or {}).get("SHELLIFY_SRC"))
         _save(records)
 
     if mine:
@@ -934,11 +978,18 @@ def _lease_named(src, who, label, session, link, instance):
             fresh=False,
             message=(
                 f"Leased {r['name']} on port {r['port']}, {left}: its model is kept, and it already "
-                "loads Shellify from this source. Call Shellify.sync."
+                f"loads {source_of(src)[2]} from this source; {_reload_hint(src)}."
             ),
         )
 
     try:
+        # Only Shellify's dev loader can switch folders in a running SketchUp.
+        if not (old_shellify and source_of(src)[1] == "SHELLIFY_SRC"):
+            raise PoolError(
+                f"it runs {old_src}, and only Shellify's dev loader can switch a running SketchUp "
+                "to another folder. Lease it with the folder it runs, or lease without naming an "
+                "instance to get one started on yours"
+            )
         now_src, error = switch_src(r["port"], src)
     except Exception as e:
         # Give it back, so it isn't held by a lease that never worked.
@@ -952,7 +1003,7 @@ def _lease_named(src, who, label, session, link, instance):
     with _locked():
         records = _load()
         rec = next(x for x in records if x["port"] == r["port"])
-        rec["env"] = dict(rec["env"] or {}, SHELLIFY_SRC=now_src)
+        rec["env"] = dict(rec["env"] or {}, SHELLIFY_SRC=now_src)  # switch_src is Shellify's only
         if error and _held_by(rec["lease"], who):
             rec["lease"] = None
         _save(records)
@@ -1023,7 +1074,9 @@ def main(argv=None):
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("status", help="show the pool")
     p = sub.add_parser("lease", help="lease an instance, starting it if need be")
-    p.add_argument("--src", required=True, help="the Shellify source folder you work in (it must have shellify.rb)")
+    p.add_argument(
+        "--src", required=True, help="the extension's source folder you work in (with shellify.rb or autoclad.rb)"
+    )
     p.add_argument("--label", help="what it's for, shown in SketchUp's viewport")
     p.add_argument(
         "--instance",
