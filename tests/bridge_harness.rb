@@ -150,6 +150,15 @@ out['stuck_reader_dropped'] = !stuck_entry.nil? && !clients(server).include?(stu
 #     last time it took any.
 steady = TCPSocket.new('127.0.0.1', PORT)
 steady.setsockopt(Socket::SOL_SOCKET, Socket::SO_RCVBUF, 4096)
+# Small kernel buffers on the server's side too, so the reply is handed over
+# in small pieces as the client reads. Linux's large default send buffer
+# would otherwise take most of the reply at once and then drain slowly,
+# with no progress the server sees, and the harness's short WRITE_TIMEOUT
+# would drop the client.
+before = clients(server).dup
+deadline = Time.now + 5
+tick(server) while (clients(server) - before).empty? && Time.now < deadline
+(clients(server) - before).each { |c| c[:sock].setsockopt(Socket::SOL_SOCKET, Socket::SO_SNDBUF, 4096) }
 steady.write(request('"y" * 2_000_000'))
 got = +''
 started = Time.now
