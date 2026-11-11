@@ -13,19 +13,31 @@ Bridge between Claude Code and a running SketchUp. Python MCP server
 
 ## Protocol
 
-One request per connection: the client connects, sends one
-newline-terminated JSON-RPC line, reads one reply, and the server closes.
-The Ruby server runs on SketchUp's main thread (a UI timer), so it never
-blocks: it reads whatever has arrived on each tick and drops a client that
-has not sent a full line within `IDLE_TIMEOUT` (5 s). The Python client
-opens a fresh connection per command and never connects at startup. A
-client that holds a connection open without sending a request used to
-freeze SketchUp; that is why both halves work this way.
+Each request is one newline-terminated JSON-RPC object and each reply one
+JSON object. The Python client keeps one socket per SketchUp open across
+requests, checks with a peek that SketchUp hasn't closed it before sending,
+and never resends an `eval_ruby` that was sent (it may have run). A client
+may also send one request per connection and close, as AutoClad's scenario
+runner does. The Ruby server runs on SketchUp's main thread (a UI timer),
+so it never blocks: it reads whatever has arrived on each tick, writes
+replies with `write_nonblock` (dropping a client that hasn't read its reply
+within `WRITE_TIMEOUT`), and answers "busy" to a tool call that arrives
+while another request is running in a nested event loop.
+
+## The pool
+
+On Windows, each session leases a SketchUp of its own from a pool of four
+(ports 9877-9880; `src/sketchup_mcp/launcher.py`, the `lease_sketchup` and
+`release_sketchup` tools; see README.md). Elsewhere, or with `SKETCHUP_PORT`
+set, tool calls go straight to `SKETCHUP_HOST:SKETCHUP_PORT`
+(localhost:9876 by default). The extension reads its port from
+`SKETCHUP_MCP_PORT` and its bind address from `SKETCHUP_MCP_BIND`.
+`tests/test_launcher.py` runs on Windows only.
 
 ## Rules
 
 - Python targets the mcp SDK 1.x (`FastMCP`) until we migrate to 2.x. Keep `mcp<2`.
-- Host/port come from `SKETCHUP_HOST` / `SKETCHUP_PORT`; never hard-code.
+- Host/port come from the pool's lease or `SKETCHUP_HOST` / `SKETCHUP_PORT`; never hard-code.
 - The Ruby server binds 127.0.0.1 by default. 0.0.0.0 only for a VM setup, never as the default.
 - Any change to the wire protocol gets a test in `tests/test_connection.py`.
 - Nothing in `su_mcp/` may block SketchUp's main thread: no blocking reads,

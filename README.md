@@ -37,18 +37,20 @@ We're using uv so you'll need to ```brew install uv```
 
 ### Starting the Connection
 
-The MCP server talks only to SketchUps it leases from its pool (below), which
-it starts itself; there is no default SketchUp to connect to. Each pool
-instance's extension listens on `127.0.0.1`, at the port the launcher sets in
-`SKETCHUP_MCP_PORT`. A SketchUp started by hand listens on 9876 (Extensions >
-MCP Server > Start Server retries if the port was taken), but the MCP server
-doesn't use it.
+On Windows, the MCP server talks only to SketchUps it leases from its pool
+(below), which it starts itself; there is no default SketchUp to connect to.
+Each pool instance's extension listens on `127.0.0.1`, at the port the
+launcher sets in `SKETCHUP_MCP_PORT`. A SketchUp started by hand listens on
+9876 (Extensions > MCP Server > Start Server retries if the port was taken),
+but the pool doesn't use it.
 
-Connecting across a VM (SketchUp in the guest, the MCP server on the host,
-with `SKETCHUP_MCP_HOST` and `SKETCHUP_MCP_BIND=0.0.0.0`) was dropped with
-the pool, which runs the MCP server and SketchUp on the same machine.
-`SKETCHUP_MCP_BIND` still sets the extension's bind address. There is no
-authentication on the port and no approval prompt before `eval_ruby` runs.
+Elsewhere (macOS), or on Windows with `SKETCHUP_PORT` set, there's no pool:
+tool calls go straight to the SketchUp at `SKETCHUP_HOST:SKETCHUP_PORT`
+(`localhost:9876` by default), and `lease_sketchup` / `release_sketchup` say
+so. That's also how a host drives a SketchUp in a VM: set `SKETCHUP_HOST` to
+the guest's address, and `SKETCHUP_MCP_BIND=0.0.0.0` in the guest, which
+sets the extension's bind address. There is no authentication on the port
+and no approval prompt before `eval_ruby` runs.
 
 ### When it stops answering
 
