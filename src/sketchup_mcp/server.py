@@ -389,7 +389,7 @@ def resolve_instance():
             "and release_sketchup when your task is done."
         )
     if not record["alive"]:
-        src = (record["env"] or {}).get("SHELLIFY_SRC")
+        src = launcher.record_src(record)
         lease = record["lease"] or {}
         try:
             new = launcher.lease(
@@ -446,9 +446,9 @@ async def server_lifespan(server: FastMCP) -> AsyncIterator[dict[str, Any]]:
 POOL_INSTRUCTIONS = (
     "SketchUp, driven through eval_ruby. Every session uses a SketchUp of its own from a "
     "pool, one at a time: call lease_sketchup before any other tool. Its src is required: "
-    "the folder you work in, which SketchUp loads Shellify from (your worktree, or "
-    "~/source/shellify if you work in the main checkout); it must have shellify.rb in it, "
-    "and there's no default. Set label to your session's title or a few words on your task. "
+    "the folder you work in, which SketchUp loads the extension from (your worktree, or "
+    "the main checkout): a Shellify folder, with shellify.rb in it, or AutoClad's src "
+    "folder, with autoclad.rb; there's no default. Set label to your session's title or a few words on your task. "
     "Tools fail until you have a lease; there is no default SketchUp. "
     "While leased, the SketchUp shows a Claude badge, so the user knows not to touch it. "
     "Call release_sketchup as soon as your task is done, before you end your turn, even if "
@@ -805,7 +805,7 @@ def _lease_reply(record: dict[str, Any]) -> dict[str, Any]:
         "port": record["port"],
         "pid": record["pid"],
         "model": record["model"],
-        "src": (record["env"] or {}).get("SHELLIFY_SRC"),
+        "src": launcher.record_src(record),
         "fresh": record["fresh"],
         "message": record["message"],
     }
@@ -818,10 +818,11 @@ async def lease_sketchup(ctx: Context, src: str, label: str = None, instance: st
     before any other SketchUp tool: with no lease they fail. A session holds
     one SketchUp at a time; leasing again returns the same one.
 
-    *src* is required: the folder you work in, which SketchUp loads
-    Shellify from (your worktree, or ~/source/shellify if you work in the
-    main checkout). There's no default, and a folder that doesn't exist or
-    has no shellify.rb is refused. *label* is shown in the
+    *src* is required: the folder you work in, which SketchUp loads the
+    extension from (your worktree, or the main checkout): a Shellify folder,
+    with shellify.rb in it (~/source/shellify for the main checkout), or
+    AutoClad's src folder, with autoclad.rb. There's no default, and a
+    folder that doesn't exist or has neither is refused. *label* is shown in the
     SketchUp's viewport badge: your session's title, or a few words on your
     task. A free instance already running on *src* is preferred; otherwise
     one is started, or restarted, on a fresh copy of the template model,
@@ -832,8 +833,9 @@ async def lease_sketchup(ctx: Context, src: str, label: str = None, instance: st
     SketchUp, to go on with what's in its model: its name ("sketchup-2"),
     its port, or the label (title) of the session that last used it. It's
     leased only if it's free (otherwise the reply names who holds it) and
-    is never restarted: its model is kept, and if it runs another folder,
-    Shellify is reloaded from *src*.
+    is never restarted: its model is kept, and if it runs another Shellify
+    folder, Shellify is reloaded from *src* (AutoClad can't switch folders,
+    so name an AutoClad instance with the folder it runs).
 
     Release it with release_sketchup as soon as your task is done. If the
     leased SketchUp dies, the next call leases again and says so."""

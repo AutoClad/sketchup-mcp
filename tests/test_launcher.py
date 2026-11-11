@@ -54,10 +54,10 @@ class PoolTest(unittest.TestCase):
         self.other = (2, 2.0)
         self.running |= {1, 2}
 
-    def src(self, name):
+    def src(self, name, marker="shellify.rb"):
         folder = self.dir / name
         folder.mkdir()
-        (folder / "shellify.rb").write_text("# Shellify")
+        (folder / marker).write_text("# the extension's registrar")
         return launcher.normalize_src(str(folder))
 
     def fake_switch(self, port, src):
@@ -76,7 +76,7 @@ class PoolTest(unittest.TestCase):
                     pid=spec["pid"],
                     started=float(spec["pid"]),
                     ready=True,
-                    env={"SHELLIFY_SRC": spec.get("src", self.a)},
+                    env=launcher._src_env(spec.get("src", self.a)),
                 )
                 self.running.add(spec["pid"])
             r["lease"] = spec.get("lease")
@@ -277,8 +277,80 @@ class NamedLeaseTest(PoolTest):
 
     def test_src_is_checked_first(self):
         self.pool({"pid": 101})
-        with self.assertRaisesRegex(PoolError, "no shellify.rb"):
+        with self.assertRaisesRegex(PoolError, "no shellify.rb or autoclad.rb"):
             launcher.lease(str(self.dir), self.me, instance="sketchup-1")
+
+    def test_an_autoclad_instance_is_leased_by_name_on_the_folder_it_runs(self):
+        autoclad = self.src("autoclad-src", "autoclad.rb")
+        self.pool({"pid": 101, "src": autoclad})
+        record = launcher.lease(autoclad, self.me, instance="sketchup-1")
+        self.assertIn("loads AutoClad from this source; call AutoClad::SketchUpUI::Dev.reload", record["message"])
+        self.assertEqual(self.switches, [])
+
+    def test_no_switch_to_or_from_an_autoclad_folder(self):
+        autoclad = self.src("autoclad-src", "autoclad.rb")
+        for runs, wanted in [(self.a, autoclad), (autoclad, self.a)]:
+            self.pool({"pid": 101, "src": runs})
+            with self.assertRaisesRegex(PoolError, "only Shellify's dev loader can switch"):
+                launcher.lease(wanted, self.me, instance="sketchup-1")
+            r = self.records()[0]
+            self.assertIsNone(r["lease"])
+            self.assertEqual(launcher.record_src(r), runs)
+        self.assertEqual(self.switches, [])
+
+
+class AutoCladSourceTest(PoolTest):
+    """AutoClad's src folder (with autoclad.rb) is leased like Shellify's, and
+    passed to SketchUp as AUTOCLAD_SRC, so AutoClad's tests can run in a pool
+    SketchUp on Windows."""
+
+    def test_an_autoclad_folder_is_accepted(self):
+        autoclad = self.src("autoclad-src", "autoclad.rb")
+        self.assertEqual(launcher.check_src(autoclad), autoclad)
+        self.assertEqual(launcher.source_of(autoclad)[1:3], ("AUTOCLAD_SRC", "AutoClad"))
+
+    def test_a_fresh_lease_records_autoclad_src(self):
+        autoclad = self.src("autoclad-src", "autoclad.rb")
+        self.pool({})
+        with (
+            mock.patch.object(launcher, "_kill"),
+            mock.patch.object(launcher, "_launch", return_value=(105, 105.0)) as launch,
+            mock.patch.object(launcher, "_wait_ready"),
+        ):
+            self.running.add(105)
+            record = launcher.lease(autoclad, self.me, label="AutoClad tests")
+        self.assertTrue(record["fresh"])
+        self.assertIn(f"loading AutoClad from {autoclad}", record["message"])
+        self.assertEqual(launch.call_args.args[1], autoclad)
+        r = self.records()[0]
+        self.assertEqual(r["env"], {"AUTOCLAD_SRC": autoclad})
+        self.assertEqual(launcher.record_src(r), autoclad)
+
+    def test_an_instance_on_shellify_is_restarted_for_autoclad(self):
+        autoclad = self.src("autoclad-src", "autoclad.rb")
+        self.pool(
+            {"pid": 101, "src": self.a},
+            {"pid": 102, "lease": self.held(self.other)},
+            {"pid": 103, "lease": self.held((3, 3.0))},
+            {"pid": 104, "lease": self.held((4, 4.0))},
+        )
+        self.running |= {3, 4}
+        with (
+            mock.patch.object(launcher, "_kill") as kill,
+            mock.patch.object(launcher, "_launch", return_value=(105, 105.0)),
+            mock.patch.object(launcher, "_wait_ready"),
+        ):
+            self.running.add(105)
+            launcher.lease(autoclad, self.me)
+        kill.assert_called_once_with(101, 101.0)
+        self.assertEqual(self.records()[0]["env"], {"AUTOCLAD_SRC": autoclad})
+
+    def test_a_running_autoclad_instance_is_reused_for_the_same_folder(self):
+        autoclad = self.src("autoclad-src", "autoclad.rb")
+        self.pool({"pid": 101, "src": autoclad})
+        record = launcher.lease(autoclad, self.me)
+        self.assertFalse(record["fresh"])
+        self.assertIn("call AutoClad::SketchUpUI::Dev.reload", record["message"])
 
 
 class SwitchSrcTest(unittest.TestCase):

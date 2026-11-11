@@ -89,7 +89,8 @@ module SU_MCP
 
       lease = record['lease']
       lease = nil unless lease && running?(lease['holder_pid'])
-      [lease, (record['env'] || {})['SHELLIFY_SRC'], record['name']]
+      env = record['env'] || {}
+      [lease, env['SHELLIFY_SRC'] || env['AUTOCLAD_SRC'], record['name']]
     end
 
     def self.running?(pid)
