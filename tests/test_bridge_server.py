@@ -52,6 +52,27 @@ def test_a_reader_that_never_reads_cannot_block_a_tick(observed):
     assert observed["stuck_reader_dropped"] is True
 
 
+def test_a_slow_but_steady_reader_gets_its_whole_reply(observed):
+    # Longer than the harness's WRITE_TIMEOUT (0.5 s), so the timeout must
+    # count from the last progress, not from when the reply was queued.
+    assert observed["steady_reader_got_whole_reply"] is True
+    assert observed["steady_reader_seconds"] > 0.5
+
+
+def test_a_client_that_half_closes_still_gets_its_answer(observed):
+    assert observed["half_closed_served"] == "half"
+
+
+def test_a_tool_call_during_another_request_is_refused_not_run(observed):
+    assert observed["outer_finished"] == "outer_done"
+    assert observed["nested_call_refused_busy"] is True
+    assert observed["nested_call_not_run"] is True
+
+
+def test_server_status_is_answered_while_a_request_runs(observed):
+    assert observed["status_answered_while_busy"] is True
+
+
 def test_one_request_per_connection_still_works_and_leaves_nothing_behind(observed):
     assert observed["one_shot_served"] == "once"
     assert observed["clients_left"] == 0

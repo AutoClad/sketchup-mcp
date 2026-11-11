@@ -139,3 +139,35 @@ def test_server_startup_does_not_connect_to_sketchup(monkeypatch):
 
     asyncio.run(run())
     assert opened == []
+
+
+def test_no_request_is_resent_by_default(make_connection):
+    # Every tool changes the model: a resent create_component builds two.
+    conn = make_connection({"replies": [ConnectionResetError("reset")]})
+
+    with pytest.raises(Exception, match="Connection to Sketchup lost"):
+        conn.send_command("create_component", {"type": "cube"})
+    sent = [s for s in conn.sockets if s.sent]
+    assert len(sent) == 1 and len(requests_sent(sent[0])) == 1
+
+
+def test_connecting_is_bounded_by_a_timeout(make_connection):
+    conn = make_connection({"replies": [json_reply({"result": {}})]})
+
+    conn.send_command("get_selection")
+
+    assert conn.sockets[0].timeout_at_connect == server.CONNECT_TIMEOUT
+
+
+def test_a_refused_connect_without_the_pool_says_how_to_start_sketchup(make_connection, monkeypatch):
+    monkeypatch.setattr(server, "launcher", None)
+    conn = make_connection({"refuse": True})
+
+    with pytest.raises(ConnectionError, match="Start Server"):
+        conn.send_command("get_selection")
+
+
+def test_the_server_reports_the_packages_version():
+    import sketchup_mcp
+
+    assert server.__version__ == sketchup_mcp.__version__

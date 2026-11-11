@@ -65,6 +65,9 @@ module SU_MCP
     # client rather than buffer an unbounded request for it.
     READ_CHUNK        = 16384
     MAX_REQUEST_BYTES = 8 * 1024 * 1024
+    # At most this much is read from one client per tick, so a client
+    # sending as fast as SketchUp reads can't keep a tick going.
+    READ_PER_TICK     = 1024 * 1024
 
     TICK_INTERVAL = 0.1
     # The watchdog restarts the tick timer if it has been silent this long
@@ -78,7 +81,7 @@ module SU_MCP
     # tools (see refuse_while_busy).
     MAX_TICK_DEPTH = 4
     MAX_LOG_CHARS  = 500
-    # A client that hasn't read its reply within this long is dropped (see
+    # A client that has taken none of its reply for this long is dropped (see
     # queue_reply).
     WRITE_TIMEOUT = 5.0
 
@@ -227,8 +230,13 @@ module SU_MCP
         break unless IO.select([@server], nil, nil, 0)
         begin
           sock = @server.accept_nonblock
-        rescue IO::WaitReadable
+        rescue IO::WaitReadable, Errno::EINTR
           break
+        rescue SystemCallError => e
+          # A client that reset before we got to it. The others still get
+          # serviced this tick.
+          log "Accept failed (#{e.class}); continuing"
+          next
         end
         @clients << { :sock => sock, :buffer => String.new, :id => @next_client_id, :busy => false,
                       :out => String.new(encoding: Encoding::BINARY), :out_since => nil }
@@ -298,12 +306,24 @@ module SU_MCP
     def drain_client(client)
       sock = client[:sock]
 
-      loop do
+      # Bounded per tick, and checked against MAX_REQUEST_BYTES as it
+      # goes, so a client sending without pause neither keeps the tick
+      # going nor grows the buffer without limit. A client that has finished
+      # sending (closed, or shut down its write side) still has the requests
+      # it sent answered; it's let go after that.
+      read = 0
+      ended = false
+      while read < READ_PER_TICK && client[:buffer].bytesize <= MAX_REQUEST_BYTES
         begin
-          client[:buffer] << sock.read_nonblock(READ_CHUNK)
+          chunk = sock.read_nonblock(READ_CHUNK)
         rescue IO::WaitReadable
           break
+        rescue EOFError
+          ended = true
+          break
         end
+        read += chunk.bytesize
+        client[:buffer] << chunk
       end
 
       if client[:buffer].bytesize > MAX_REQUEST_BYTES
@@ -317,6 +337,7 @@ module SU_MCP
         client[:buffer] = client[:buffer].byteslice(consumed..-1) || String.new
         if request && !running_requests.empty? && runs_code?(request)
           refuse_while_busy(sock, request)
+          break unless @clients.include?(client)
         elsif request
           client[:busy] = true
           begin
@@ -329,8 +350,15 @@ module SU_MCP
         else
           log "Client ##{client[:id]}: JSON parse error"
           send_error(sock, nil, -32700, "Parse error")
+          break unless @clients.include?(client)
         end
       end
+
+      return unless ended && @clients.include?(client)
+
+      # Send what's queued while we still can, then let it go.
+      flush_client(client) unless client[:out].empty?
+      drop_client(client, "closed its side") if @clients.include?(client) && client[:out].empty?
     end
 
     # Whether a request runs a tool, which can run Ruby and change the
@@ -492,8 +520,8 @@ module SU_MCP
     # Replies never wait on the client. What its socket takes now is sent;
     # the rest stays in the client's :out and goes out on later ticks
     # (flush_client). A blocking write would stop SketchUp's main thread for
-    # as long as a client chose not to read, so a client that hasn't read its
-    # reply within WRITE_TIMEOUT is dropped instead.
+    # as long as a client chose not to read, so a client that has taken none
+    # of its reply for WRITE_TIMEOUT is dropped instead.
     def queue_reply(sock, body)
       client = @clients.find { |c| c[:sock].equal?(sock) }
       return unless client
@@ -503,12 +531,15 @@ module SU_MCP
       flush_client(client)
     end
 
+    # WRITE_TIMEOUT counts from the last time the client took any of its
+    # reply, so a large reply read slowly over a VM link isn't cut off.
     def flush_client(client)
       until client[:out].empty?
         written = client[:sock].write_nonblock(client[:out], exception: false)
         break if written == :wait_writable
 
         client[:out] = client[:out].byteslice(written..-1)
+        client[:out_since] = Time.now
       end
       if client[:out].empty?
         client[:out_since] = nil

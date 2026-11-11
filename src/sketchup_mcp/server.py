@@ -35,7 +35,11 @@ logger = logging.getLogger("SketchupMCPServer")
 EVAL_TIMEOUT = float(os.environ.get("SKETCHUP_MCP_EVAL_TIMEOUT", "50"))
 
 # Define version directly to avoid pkg_resources dependency
-__version__ = "0.2.0"
+from . import __version__  # noqa: E402
+
+# How long connecting may take. An unreachable host (a VM that's off)
+# otherwise waits as long as the operating system does, holding the call.
+CONNECT_TIMEOUT = 3.0
 logger.info(f"SketchupMCP Server version {__version__} starting up")
 
 
@@ -78,6 +82,7 @@ class SketchupConnection:
 
         try:
             self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.sock.settimeout(CONNECT_TIMEOUT)
             self.sock.connect((self.host, self.port))
             self.buffer = b""
             logger.info(f"Connected to Sketchup at {self.host}:{self.port}")
@@ -204,13 +209,16 @@ class SketchupConnection:
         params: dict[str, Any] = None,
         request_id: Any = None,
         timeout: float = 15.0,
-        retries: int = 2,
+        retries: int = 0,
     ) -> dict[str, Any]:
         """Send a JSON-RPC request to Sketchup and return the response
 
-        timeout/retries are per call: eval_ruby can run for a long time and
-        is not safe to repeat, so it needs a long timeout and no automatic
-        retry (a retry after a timeout runs the same code a second time).
+        timeout/retries are per call: eval_ruby can run for a long time, so
+        it needs a long timeout. A request is never resent by default: a
+        timeout or reset after sending doesn't mean it didn't run, and every
+        tool changes the model (a resent create_component builds a second
+        one). A socket SketchUp has closed is noticed before sending (see
+        connect), which is the failure a retry used to cover.
         """
         with self.lock:
             return self._send_command(method, params, request_id, timeout, retries)
@@ -218,11 +226,17 @@ class SketchupConnection:
     def _send_command(self, method, params, request_id, timeout, retries):
         # Try to connect if not connected
         if not self.connect():
-            raise ConnectionError(
-                f"Could not connect to Sketchup at {self.host}:{self.port}. "
-                "Its SketchUp may still be loading, or stopped at a dialog; if it "
-                "has died, the next call leases again."
-            )
+            if use_pool():
+                hint = (
+                    "Its SketchUp may still be loading, or stopped at a dialog; if it has died, "
+                    "the next call leases again."
+                )
+            else:
+                hint = (
+                    "Is SketchUp running, with Extensions > MCP Server > Start Server, and "
+                    "SKETCHUP_HOST / SKETCHUP_PORT pointing at it?"
+                )
+            raise ConnectionError(f"Could not connect to Sketchup at {self.host}:{self.port}. {hint}")
 
         # Ensure we're sending a proper JSON-RPC request
         if method == "tools/call" and params and "name" in params and "arguments" in params:
@@ -742,8 +756,9 @@ def _eval_ruby(code: str, request_id) -> str:
 
 @mcp.tool()
 async def eval_ruby(ctx: Context, code: str) -> str:
-    """Evaluate arbitrary Ruby code in this session's leased SketchUp (see
-    lease_sketchup)."""
+    """Evaluate arbitrary Ruby code in SketchUp: on Windows, this session's
+    leased SketchUp (see lease_sketchup); elsewhere, or with SKETCHUP_PORT
+    set, the SketchUp at SKETCHUP_HOST:SKETCHUP_PORT, with no lease."""
     # In a thread, so the server keeps answering meanwhile, and server_status
     # still gets through.
     return await asyncio.to_thread(_eval_ruby, code, ctx.request_id)
@@ -798,9 +813,10 @@ def _lease_reply(record: dict[str, Any]) -> dict[str, Any]:
 
 @mcp.tool()
 async def lease_sketchup(ctx: Context, src: str, label: str = None, instance: str = None) -> str:
-    """Lease a SketchUp of this session's own from the pool. Call it before
-    any other SketchUp tool: with no lease they fail. A session holds one
-    SketchUp at a time; leasing again returns the same one.
+    """Lease a SketchUp of this session's own from the pool (Windows only;
+    without the pool, as on a Mac, it isn't needed and says so). Call it
+    before any other SketchUp tool: with no lease they fail. A session holds
+    one SketchUp at a time; leasing again returns the same one.
 
     *src* is required: the folder you work in, which SketchUp loads
     Shellify from (your worktree, or ~/source/shellify if you work in the

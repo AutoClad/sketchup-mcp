@@ -67,8 +67,11 @@ def reply_for(server, client, within: 3)
   buffer
 end
 
+# The reply's text, or nil if there's no whole reply.
 def text_of(reply)
   reply.empty? ? nil : JSON.parse(reply).dig('result', 'content', 0, 'text')
+rescue JSON::ParserError
+  nil
 end
 
 # Reads past anything the server sent (an error reply, say) to see whether
@@ -134,15 +137,64 @@ stuck.setsockopt(Socket::SOL_SOCKET, Socket::SO_RCVBUF, 4096)
 stuck.write(request('"x" * 20_000_000'))
 # Building the 20 MB reply is the command's own cost; what must stay fast is
 # every tick after it, while the reply sits unread.
-tick(server) until clients(server).any? { |c| !c[:out].empty? }
+deadline = Time.now + 10
+tick(server) until clients(server).any? { |c| !c[:out].empty? } || Time.now > deadline
+stuck_entry = clients(server).find { |c| !c[:out].empty? }
 $ticks.clear
 run_until(server, 1.5)
 out['slowest_tick_ms_with_stuck_reader'] = ($ticks.max * 1000).round(1)
-out['stuck_reader_dropped'] = clients(server).none? { |c| !c[:out].empty? }
+out['stuck_reader_dropped'] = !stuck_entry.nil? && !clients(server).include?(stuck_entry)
+
+# 5b. A client reading a large reply slowly but steadily gets all of it, even
+#     when that takes longer than WRITE_TIMEOUT: the timeout counts from the
+#     last time it took any.
+steady = TCPSocket.new('127.0.0.1', PORT)
+steady.setsockopt(Socket::SOL_SOCKET, Socket::SO_RCVBUF, 4096)
+steady.write(request('"y" * 2_000_000'))
+got = +''
+started = Time.now
+while Time.now - started < 20 && !got.include?("\n")
+  tick(server)
+  chunk = steady.read_nonblock(16_384, exception: false)
+  break if chunk.nil?
+
+  got << chunk if chunk.is_a?(String)
+  sleep 0.01
+end
+out['steady_reader_seconds'] = (Time.now - started).round(2)
+out['steady_reader_got_whole_reply'] = (text_of(got)&.length == 2_000_000)
+
+# 5c. A client that sends its request and shuts down its write side still
+#     gets the answer.
+half = TCPSocket.new('127.0.0.1', PORT)
+half.write(request('"half"'))
+half.close_write
+out['half_closed_served'] = text_of(reply_for(server, half))
+
+# 5d. While a request is running (here, ticking the server itself, as a
+#     nested event loop in SketchUp does), another client's tool call is
+#     answered "busy" and not run, and server_status is answered.
+other = TCPSocket.new('127.0.0.1', PORT)
+$ran_inside = false
+$nested_probe = lambda do
+  other.write(request('$ran_inside = true', id: 10))
+  busy = reply_for(server, other)
+  other.write("#{JSON.generate({ jsonrpc: '2.0', method: 'tools/call', id: 11,
+                                 params: { name: 'server_status', arguments: {} } })}\n")
+  status = reply_for(server, other)
+  [busy, status]
+end
+outer = TCPSocket.new('127.0.0.1', PORT)
+outer.write(request('$nested = $nested_probe.call; :outer_done', id: 12))
+out['outer_finished'] = text_of(reply_for(server, outer))
+busy, status = $nested || ['', '']
+out['nested_call_refused_busy'] = busy.empty? ? nil : JSON.parse(busy).dig('error', 'message').to_s.include?('busy')
+out['nested_call_not_run'] = !$ran_inside
+out['status_answered_while_busy'] = status.empty? ? nil : text_of(status).to_s.include?('in flight')
 
 # 6. Clients that hang up are let go: one request per connection, as the
 #    AutoClad scenario runner sends them, leaves nothing behind.
-[silent, good, slow, broken, stuck].each { |s| s.close rescue nil }
+[silent, good, slow, broken, stuck, steady, half, other, outer].each { |s| s.close rescue nil }
 once = TCPSocket.new('127.0.0.1', PORT)
 once.write(request('"once"'))
 out['one_shot_served'] = text_of(reply_for(server, once))

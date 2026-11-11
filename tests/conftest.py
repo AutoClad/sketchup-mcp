@@ -28,6 +28,7 @@ class FakeSocket:
         self.closed_before_send = closed_before_send
 
     def connect(self, addr):
+        self.timeout_at_connect = self.timeout
         if self.refuse:
             raise ConnectionRefusedError("refused")
         self.address = addr
