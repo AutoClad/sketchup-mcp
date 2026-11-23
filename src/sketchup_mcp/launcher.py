@@ -17,7 +17,10 @@ every MCP server and the sketchup-launcher CLI read and write:
 A lease belongs to a holder process (an MCP server, or the shell that ran the
 CLI), recorded by pid and start time so a reused pid isn't mistaken for it,
 and a holder has one SketchUp at most. A lease whose holder has gone is freed
-by the next lease, release or status. The extension in a pool instance reads
+by the next lease, release or status. So each session needs an MCP server of
+its own, started by its Claude Code: a server the Claude desktop app starts
+from its own config is shared by every Code session, and refuses to lease
+(see shared_server). The extension in a pool instance reads
 pool.json too, and shows a badge in the viewport while it's leased.
 
 Nothing is stopped for being idle. An instance is started, or restarted, only
@@ -172,6 +175,70 @@ def _processes():
     finally:
         _kernel32.CloseHandle(snapshot)
     return found
+
+
+_kernel32.QueryFullProcessImageNameW.argtypes = [
+    wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD)]
+
+
+def image_path(pid):
+    """The full path of a running process's program, or None."""
+    handle = _kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, int(pid))
+    if not handle:
+        return None
+    try:
+        size = wintypes.DWORD(32768)
+        buffer = ctypes.create_unicode_buffer(size.value)
+        if not _kernel32.QueryFullProcessImageNameW(handle, 0, buffer, ctypes.byref(size)):
+            return None
+        return buffer.value
+    finally:
+        _kernel32.CloseHandle(handle)
+
+
+# Programs that start Python for something else (a venv's python.exe runs
+# the real interpreter as its child): the process that started the MCP
+# server is the first ancestor that isn't one of them.
+PYTHON_LAUNCHERS = {"python.exe", "pythonw.exe", "py.exe", "uv.exe", "uvx.exe"}
+
+
+def shared_server(pid=None, table=None, path_of=image_path):
+    """Why the MCP server in process pid (default: this one) is shared by
+    several Claude sessions, or None if it isn't.
+
+    A lease belongs to a holder process, so the pool tells sessions apart
+    only if each runs a server of its own. One the Claude desktop app
+    starts itself, from its own config (claude_desktop_config.json), is
+    shared: the app passes every Code session's calls through it, so they'd
+    all be one holder, and one session's lease or release would end
+    another's (found 2026-11-23). A session's own server is started by its
+    Claude Code process, and one run from a terminal by that terminal's
+    program.
+    """
+    table = _processes() if table is None else table
+    pid = pid or os.getpid()
+    seen = set()
+    while pid in table and pid not in seen:
+        seen.add(pid)
+        parent, _ = table[pid]
+        if not parent or parent not in table:
+            return None
+        pid = parent
+        if table[pid][1].lower() not in PYTHON_LAUNCHERS:
+            break
+    else:
+        return None
+    path = (path_of(pid) or "").replace("/", "\\").lower()
+    if "\\windowsapps\\claude_" not in path:
+        return None
+    return (
+        "This SketchUp MCP server was started by the Claude desktop app itself (it's in the "
+        "app's claude_desktop_config.json), so every Code session's calls come through this one "
+        "server and the pool can't tell them apart: one session's lease or release would end "
+        "another's, and their calls would go to each other's SketchUp. So it leases nothing. "
+        "Register the server with Claude Code instead (user scope, in ~/.claude.json), remove it "
+        "from the desktop app's config, and restart the app: each session then starts its own."
+    )
 
 
 def holder(pid=None):

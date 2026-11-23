@@ -270,5 +270,73 @@ class SwitchSrcTest(unittest.TestCase):
                     launcher.switch_src(9877, "C:/a")
 
 
+APP = r"C:\Program Files\WindowsApps\Claude_6.28899.6.0_x64__pzs8sxrjxfjjc\app\claude.exe"
+CODE = r"C:\Users\someone\AppData\Local\Claude-Data\claude_x\claude-code\2.1.330\abc\claude.exe"
+
+
+class SharedServerTest(unittest.TestCase):
+    """A server the desktop app starts itself is shared by every Code
+    session; one a session's Claude Code (or a terminal) starts isn't."""
+
+    def shared(self, *chain, paths=None):
+        """Whether the server at the start of chain, a list of exe names
+        from the server up to its farthest ancestor, is shared; paths gives
+        full paths by pid (pids are 1, 2, ... along the chain)."""
+        table = {i + 1: (i + 2 if i + 1 < len(chain) else 0, name) for i, name in enumerate(chain)}
+        paths = paths or {}
+        return launcher.shared_server(1, table, lambda pid: paths.get(pid))
+
+    def test_a_server_the_desktop_app_starts_is_shared(self):
+        # A venv's python.exe runs the real interpreter as its child.
+        message = self.shared("python.exe", "python.exe", "claude.exe", "sihost.exe", paths={3: APP})
+        self.assertIn("claude_desktop_config.json", message)
+        self.assertIn("~/.claude.json", message)
+        self.assertIsNotNone(self.shared("python.exe", "claude.exe", paths={2: APP.replace("\\", "/")}))
+
+    def test_a_server_a_session_starts_isnt(self):
+        self.assertIsNone(self.shared("python.exe", "python.exe", "claude.exe", "claude.exe", "claude.exe",
+                                      paths={3: CODE, 4: APP, 5: APP}))
+        self.assertIsNone(self.shared("python.exe", "uvx.exe", "claude.exe", paths={3: CODE}))
+        self.assertIsNone(self.shared("python.exe", "powershell.exe", paths={2: r"C:\Windows\powershell.exe"}))
+
+    def test_an_unknown_parent_isnt(self):
+        self.assertIsNone(self.shared("python.exe"))
+        self.assertIsNone(self.shared("python.exe", "claude.exe"))  # its path can't be read
+        self.assertIsNone(launcher.shared_server(1, {}, lambda pid: APP))
+        # A loop in the table (pids reused) ends.
+        self.assertIsNone(launcher.shared_server(1, {1: (2, "python.exe"), 2: (1, "python.exe")}, lambda pid: APP))
+
+    def test_this_process_is_found(self):
+        # Run from a shell or a session's Claude Code, never the app itself.
+        self.assertIsNone(launcher.shared_server())
+
+
+class SharedServerRefusesTest(unittest.TestCase):
+    def setUp(self):
+        from sketchup_mcp import server
+        self.server = server
+        for name, value in [("_shared", None), ("_holder", None)]:
+            patcher = mock.patch.object(server, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        patcher = mock.patch.object(launcher, "shared_server", return_value="shared, so it leases nothing")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_it_leases_releases_and_runs_nothing(self):
+        import asyncio
+        with mock.patch.object(launcher, "lease") as lease, mock.patch.object(launcher, "release") as release, \
+                mock.patch.object(launcher, "held") as held:
+            for reply in [asyncio.run(self.server.lease_sketchup(None, "C:/a")),
+                          asyncio.run(self.server.release_sketchup(None)),
+                          self.server._server_status(1)]:
+                self.assertEqual(json.loads(reply), {"success": False, "error": "shared, so it leases nothing"})
+            with self.assertRaisesRegex(Exception, "shared, so it leases nothing"):
+                self.server.get_sketchup_connection()
+            lease.assert_not_called()
+            release.assert_not_called()
+            held.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

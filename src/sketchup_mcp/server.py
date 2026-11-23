@@ -315,9 +315,17 @@ _connections: Dict[tuple, SketchupConnection] = {}
 _connections_lock = threading.Lock()
 _holder = None
 
+_shared = None
+
 def session_holder():
-    """This MCP server's process, which its lease belongs to (see launcher)."""
-    global _holder
+    """This MCP server's process, which its lease belongs to (see launcher).
+    Raises if the server is shared by several sessions (see
+    launcher.shared_server), which then lease, release and run nothing."""
+    global _holder, _shared
+    if _shared is None:
+        _shared = launcher.shared_server() or ""
+    if _shared:
+        raise Exception(_shared)
     if _holder is None:
         _holder = launcher.holder()
     return _holder
@@ -385,6 +393,12 @@ async def server_lifespan(server: FastMCP) -> AsyncIterator[Dict[str, Any]]:
     """Manage server startup and shutdown lifecycle"""
     try:
         logger.info("SketchupMCP server starting up")
+        try:
+            shared = launcher.shared_server()
+            if shared:
+                logger.warning(shared)
+        except Exception as e:
+            logger.warning(f"Could not check whether this server is shared: {e}")
         yield {}
     finally:
         for connection in list(_connections.values()):

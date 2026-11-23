@@ -84,6 +84,19 @@ Configure Claude to use the MCP server by adding the following to your Claude co
 
 This will pull the [latest from PyPI](https://pypi.org/project/sketchup-mcp/)
 
+With the pool (see `launcher.py`), register it with Claude Code, not in the
+Claude desktop app's own `claude_desktop_config.json`, so each session starts a
+server of its own: a lease belongs to the server's process, so the pool tells
+sessions apart only by their servers. One the desktop app starts from its own
+config is shared by every Code session (found 2026-11-23: one session's lease
+ended another's, and their calls went to each other's SketchUp), so such a
+server refuses to lease, and says why. At user scope, from the fork's
+checkout:
+
+```powershell
+claude mcp add --scope user sketchup -e SKETCHUP_MCP_HOST=localhost -e SKETCHUP_MCP_PORT=9876 -- "$env:USERPROFILE\source\sketchup-mcp\.venv\Scripts\python.exe" -m sketchup_mcp
+```
+
 Once connected, Claude can interact with Sketchup using the following capabilities:
 
 #### Tools
