@@ -69,33 +69,46 @@ client's limit.
 
 ### Using with Claude
 
-Configure Claude to use the MCP server by adding the following to your Claude configuration:
-
-```json
-    "mcpServers": {
-        "sketchup": {
-            "command": "uvx",
-            "args": [
-                "sketchup-mcp"
-            ]
-        }
-    }
-```
-
-This will pull the [latest from PyPI](https://pypi.org/project/sketchup-mcp/)
-
-With the pool (see `launcher.py`), register it with Claude Code, not in the
-Claude desktop app's own `claude_desktop_config.json`, so each session starts a
-server of its own: a lease belongs to the server's process, so the pool tells
-sessions apart only by their servers. One the desktop app starts from its own
-config is shared by every Code session (found 2026-11-23: one session's lease
-ended another's, and their calls went to each other's SketchUp), so such a
-server refuses to lease, and says why. At user scope, from the fork's
-checkout:
+Register this fork's server with Claude Code, at user scope, so every project
+has it. Install the fork first (`pip install -e .` into its `.venv`), then:
 
 ```powershell
-claude mcp add --scope user sketchup -e SKETCHUP_MCP_HOST=localhost -e SKETCHUP_MCP_PORT=9876 -- "$env:USERPROFILE\source\sketchup-mcp\.venv\Scripts\python.exe" -m sketchup_mcp
+claude mcp add --scope user sketchup -- "$env:USERPROFILE\source\sketchup-mcp\.venv\Scripts\python.exe" -m sketchup_mcp
 ```
+
+That writes this to `~/.claude.json` (check it with `claude mcp get
+sketchup`), which can be added by hand instead:
+
+```json
+"mcpServers": {
+  "sketchup": {
+    "type": "stdio",
+    "command": "C:\\Users\\<you>\\source\\sketchup-mcp\\.venv\\Scripts\\python.exe",
+    "args": ["-m", "sketchup_mcp"],
+    "env": {}
+  }
+}
+```
+
+With only the Claude desktop app, `claude` isn't on the path: the app's own
+copy of Claude Code is `%LOCALAPPDATA%\Claude-Data\claude_<package
+id>\claude-code\<version>\<id>\claude.exe`. New sessions get the server; ones
+already open don't.
+
+Don't register it in the desktop app's own `claude_desktop_config.json` (in
+`%LOCALAPPDATA%\Claude-Data\claude_<package id>\`). A lease belongs to the
+server's process, so the pool tells sessions apart only if each has a server
+of its own, started by its Claude Code. The desktop app starts a server from
+its own config once, itself, and passes every Code session's calls through
+it (found 2026-11-23: one session's lease ended another's, and their calls
+went to each other's SketchUp). Such a server refuses to lease, and says why.
+
+The server reads no `SKETCHUP_MCP_HOST` or `SKETCHUP_MCP_PORT`: it talks
+only to the pool's instances, on 127.0.0.1, and the launcher gives each
+instance's extension its port.
+
+Upstream's README configures `uvx sketchup-mcp`, which pulls [upstream from
+PyPI](https://pypi.org/project/sketchup-mcp/): it has no pool.
 
 Once connected, Claude can interact with Sketchup using the following capabilities:
 
@@ -146,8 +159,9 @@ instructions tell every session these rules.
 * While leased, a pool instance shows Claude's icon in the bottom left of
   its viewport (an overlay; hovering shows the `label` and the instance's
   name), and a "Claude"
-  toolbar whose button opens the session that holds it, when the server ran
-  in the Claude desktop app (`su_mcp/su_mcp/lease_badge.rb`). The icon,
+  toolbar whose button opens the session that holds it, when the server was
+  started by a Claude Code session in the desktop app, which gives it the
+  session's id (`su_mcp/su_mcp/lease_badge.rb`). The icon,
   `su_mcp/su_mcp/images/claude.svg`, is from Wikimedia Commons
   (File:Claude-ai-icon.svg, CC0); the PNGs beside it are renders of it.
 * `sketchup-launcher status | lease --src <folder> [--label <text>] [--instance <name>] | release`
