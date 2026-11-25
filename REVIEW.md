@@ -20,6 +20,9 @@ Flag:
   weaker `shared_server` check.
 - A lease that could start or restart a SketchUp another session holds, or
   touch the user's own SketchUp on 9876.
+- A change to `launcher.py` or `host/windows.py` that alters what the pool
+  does on Windows without saying so, and a name added to one of
+  `host/windows.py` and `host/macos.py` but not the other.
 - A test that starts SketchUp, or reads or writes the real `pool.json`.
 - `eval_ruby` executes arbitrary Ruby inside SketchUp. Any change that
   widens who can reach the TCP port (binding to 0.0.0.0 by default,
@@ -35,4 +38,5 @@ Do not flag:
   ignores some of it; tighten as files are touched.
 - Formatting in the files listed under `[tool.ruff.format]` in
   `pyproject.toml`, which the format check leaves out.
-- That the launcher runs on Windows only.
+- That `host/windows.py` isn't in the style of the rest: it is the
+  launcher's Windows code moved as it was.

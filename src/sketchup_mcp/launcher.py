@@ -12,7 +12,8 @@ it releases it the instance keeps running for the next one.
 There is no daemon. The state is a JSON file, guarded by a lock file, that
 every MCP server and the sketchup-launcher CLI read and write:
 
-    %LOCALAPPDATA%\\sketchup-mcp\\pool.json
+    %LOCALAPPDATA%\\sketchup-mcp\\pool.json                        (Windows)
+    ~/Library/Application Support/sketchup-mcp/pool.json        (macOS)
 
 A lease belongs to a holder process (an MCP server, or the shell that ran the
 CLI), recorded by pid and start time so a reused pid isn't mistaken for it,
@@ -33,16 +34,19 @@ is kept (last_lease) until its SketchUp restarts. It's leased only if it's
 free, and never restarted: if it runs another source folder, the dev loader
 reloads Shellify from the new one (Shellify.sync(src)), keeping the model.
 
-The Claude desktop app is a packaged (MSIX) app, so the processes it starts,
+What differs between Windows and macOS (the lock, finding processes,
+starting and ending SketchUp, the paths) is in the host package, one module
+for each; the rules here are the same on both.
+
+On Windows, the Claude desktop app is a packaged (MSIX) app, so the processes it starts,
 MCP servers included, see %LOCALAPPDATA% virtualized: a folder they create
 there goes to the package's private copy (in Packages, under LocalCache),
 which nothing outside the package sees, though writes into a folder that
 already exists outside go through (checked 2026-10-22). So the pool's folder
 is created from outside the package the first time (see _ensure_pool_dir),
 and SketchUp is started, its model copied and its autosave deleted by a
-scheduled task, outside the package too (see _launch and spawn).
-
-Windows only, like SketchUp 2026.
+scheduled task, outside the package too (see host/windows.py's start and
+spawn). macOS has none of this: see host/macos.py.
 """
 
 import argparse
@@ -56,7 +60,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .host import PoolError
-from .host import windows as _os
+
+# What differs by system (see the host package's notes).
+if sys.platform == "win32":
+    from .host import windows as _os
+else:
+    from .host import macos as _os
 
 POOL_DIR = _os.DATA_DIR / "sketchup-mcp"
 POOL_FILE = POOL_DIR / "pool.json"
@@ -724,6 +733,7 @@ def main(argv=None):
     args = parser.parse_args(argv)
 
     if args.command == "spawn":
+        # Windows only: there, SketchUp is started by a scheduled task.
         _os.spawn(args.request, POOL_FILE)
         return 0
 
