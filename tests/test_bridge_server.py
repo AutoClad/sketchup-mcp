@@ -14,7 +14,23 @@ ROOT = Path(__file__).resolve().parent.parent
 HARNESS = ROOT / "tests" / "bridge_harness.rb"
 SERVER = ROOT / "su_mcp" / "su_mcp" / "main.rb"
 
-pytestmark = pytest.mark.skipif(shutil.which("ruby") is None, reason="needs ruby on PATH")
+
+def no_ruby():
+    """Why these can't run with the ruby on the path, or None. The harness
+    is written for Ruby 3 (SketchUp's is 3.2), and macOS's own is 2.6."""
+    if shutil.which("ruby") is None:
+        return "needs ruby on PATH"
+    try:
+        asked = subprocess.run(["ruby", "-e", "print RUBY_VERSION"], capture_output=True, text=True, timeout=60)
+        version = asked.stdout.strip()
+        if int(version.split(".")[0]) >= 3:
+            return None
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        version = "one that doesn't run"
+    return f"needs Ruby 3 or later; the ruby on PATH is {version}"
+
+
+pytestmark = pytest.mark.skipif(no_ruby() is not None, reason=str(no_ruby()))
 
 
 @pytest.fixture(scope="module")
