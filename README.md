@@ -127,7 +127,7 @@ Once connected, Claude can interact with Sketchup using the following capabiliti
 
 ### A pool of SketchUps
 
-Several sessions on one Windows machine each drive a SketchUp of their own
+Several sessions on one machine each drive a SketchUp of their own
 (`src/sketchup_mcp/launcher.py`): a pool of four instances, on ports
 9877-9880, each with its own copy of a template model and its own source
 folder. The template is an empty model shipped with the package
@@ -171,12 +171,34 @@ instructions tell every session these rules.
   tested with `uv run pytest`, which puts its `src` first on the path.
 
 The state is `%LOCALAPPDATA%\sketchup-mcp\pool.json`, under a lock file.
-SketchUp is started by a scheduled task per instance ("SketchUp pool
+On Windows, SketchUp is started by a scheduled task per instance ("SketchUp pool
 sketchup-N"), not as a child of the MCP server: an MCP client may run its
 server in a job object that kills its children when it closes, and the Claude
 desktop app, a packaged app, virtualizes `%LOCALAPPDATA%` for everything it
 starts, so files it creates there can be invisible to SketchUp. The module's
 docstring has the details.
+
+#### On macOS
+
+The pool's rules are the same. What differs is in
+`src/sketchup_mcp/host/macos.py`:
+
+* The state is `~/Library/Application Support/sketchup-mcp/pool.json`, and
+  each instance's model is in `models/` beside it.
+* SketchUp is `/Applications/SketchUp 2026/SketchUp.app`, unless
+  `SKETCHUP_EXE` names the program inside another bundle
+  (`.../SketchUp.app/Contents/MacOS/SketchUp`). Each instance is that
+  program run on its model, with its port and source folder in its
+  environment, detached from the MCP server that started it.
+* Ending one asks it to quit and kills it five seconds later if it's still
+  there.
+* Register the server with Claude Code at user scope, as on Windows:
+  `claude mcp add --scope user sketchup -- uv --directory <this checkout> run sketchup-mcp`.
+
+This has been run against a stand-in program only (`tests/test_host_macos.py`),
+never a real SketchUp on a Mac. Not yet known there: whether SketchUp opens
+a model named on its command line, what it shows after one was killed, and
+where it keeps autosaves.
 
 ### Example Commands
 

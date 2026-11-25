@@ -1,12 +1,13 @@
-"""Lets the suite load sketchup_mcp off Windows.
+"""Shared fixtures, and stand-ins that let the pool's Windows code load off
+Windows.
 
-launcher.py uses Windows' APIs as it loads (msvcrt, and kernel32, advapi32
-and userenv through ctypes.WinDLL), and server.py imports it, so on Linux
-(CI) or macOS neither can be imported as they are. Before any test module
-is, this puts stand-ins in their place: a lock that locks nothing, and DLLs
-whose every function fails by returning 0, as a Windows call does. So off
-Windows process_started finds no process and _processes finds none, and a
-test that needs a real answer from Windows must replace it or be skipped.
+sketchup_mcp/host/windows.py uses Windows' APIs as it loads (msvcrt, and
+kernel32, advapi32 and userenv through ctypes.WinDLL). The package doesn't
+load it off Windows, but the tests of Windows' rules do, on every system.
+So before any test module is imported, this puts stand-ins in their place: a
+lock that locks nothing, and DLLs whose every function fails by returning 0,
+as a Windows call does. A test that needs a real answer from Windows is
+skipped off Windows; tests/test_host_windows.py is all of that kind.
 
 On Windows nothing is replaced.
 """

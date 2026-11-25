@@ -278,7 +278,19 @@ CODE = r"C:\Users\someone\AppData\Local\Claude-Data\claude_x\claude-code\2.1.330
 
 class SharedServerTest(unittest.TestCase):
     """A server the desktop app starts itself is shared by every Code
-    session; one a session's Claude Code (or a terminal) starts isn't."""
+    session; one a session's Claude Code (or a terminal) starts isn't.
+    These are Windows' programs and paths; tests/test_host_macos.py has
+    macOS's."""
+
+    def setUp(self):
+        # Windows' rules, on whatever system the tests run: off Windows the
+        # module loads through conftest's stand-ins.
+        from sketchup_mcp.host import windows
+
+        for name, value in [("_os", windows), ("PYTHON_LAUNCHERS", windows.PYTHON_LAUNCHERS)]:
+            patcher = mock.patch.object(launcher, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
 
     def shared(self, *chain, paths=None):
         """Whether the server at the start of chain, a list of exe names
