@@ -49,6 +49,7 @@ src = ["src", "tests"]
 # `uvx ruff format <file>`. A new file is checked from the start.
 exclude = [
     "examples/*.py",
+    "src/sketchup_mcp/host/windows.py",
     "src/sketchup_mcp/launcher.py",
     "src/sketchup_mcp/server.py",
     "test_eval_ruby.py",
@@ -70,7 +71,7 @@ ignore = [
 "test_eval_ruby.py" = ["E402"]
 # Long lines from before the limit: the scheduled task's XML, written as one
 # f-string with a line per element, and five log and reply lines in the server.
-"src/sketchup_mcp/launcher.py" = ["E501"]
+"src/sketchup_mcp/host/windows.py" = ["E501"]
 "src/sketchup_mcp/server.py" = ["E501"]
 
 [build-system]
