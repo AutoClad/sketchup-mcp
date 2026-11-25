@@ -11,3 +11,28 @@ jobs:
     uses: AutoClad/.github/.github/workflows/python-ci.yml@d76409eba862b7b9805edf4fd9c4ad295f2f127f
     with:
       python-version: '3.10'
+
+  # The same tests on the systems the pool runs on, which the shared workflow
+  # (Linux only) doesn't cover. On Windows the launcher's own code runs, with
+  # no stand-ins; these are GitHub's machines, and none starts SketchUp.
+  pytest-os:
+    name: pytest (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # macos-15-intel, not macos-latest: on 2026-11-25 GitHub had no
+        # macOS arm64 runners to give ("capacity constraints"), and a job
+        # for one was cancelled after 15 minutes in the queue. Nothing here
+        # depends on the processor.
+        os: [windows-latest, macos-15-intel]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v9.0.0
+        with:
+          python-version: '3.10'
+      - run: uv sync --locked --all-extras --dev
+      - run: ruby --version
+      # -rs names each skipped test and why, so a test that silently stops
+      # running on a system shows in the log.
+      - run: uv run pytest -rs
