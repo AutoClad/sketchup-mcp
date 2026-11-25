@@ -23,7 +23,7 @@ if sys.platform == "win32":
 FAKE_SKETCHUP = """
 import json, os, sys, time
 with open(sys.argv[0] + ".seen.tmp", "w") as f:
-    json.dump({"pid": os.getpid(), "env": dict(os.environ), "argv": sys.argv}, f)
+    json.dump({"pid": os.getpid(), "ppid": os.getppid(), "env": dict(os.environ), "argv": sys.argv}, f)
 os.replace(sys.argv[0] + ".seen.tmp", sys.argv[0] + ".seen")
 time.sleep(120)
 """
@@ -128,11 +128,14 @@ def test_spawn_starts_the_program_on_a_copy_of_the_template_with_its_port_and_so
 
     reply = json.loads(result.read_text(encoding="utf-8"))
     assert "error" not in reply, reply
+    seen = {}
     try:
         seen_file = model.with_name(model.name + ".seen")
         assert wait_for(seen_file.exists), "the program never ran"
         seen = json.loads(seen_file.read_text())
-        assert seen["pid"] == reply["pid"]
+        # A venv's python.exe runs the real interpreter as its child, so the
+        # program spawn started is this one or its parent.
+        assert reply["pid"] in (seen["pid"], seen["ppid"])
         assert launcher.is_running(reply["pid"], reply["started"])
         assert seen["argv"] == [str(model)]
         assert model.read_text() == FAKE_SKETCHUP
@@ -143,6 +146,8 @@ def test_spawn_starts_the_program_on_a_copy_of_the_template_with_its_port_and_so
         assert "SYSTEMROOT" in {name.upper() for name in seen["env"]}
     finally:
         launcher._kill(reply["pid"], reply["started"])
+        if seen and seen["pid"] != reply["pid"]:
+            windows.kill(seen["pid"])
     assert not launcher.is_running(reply["pid"], reply["started"])
 
 
