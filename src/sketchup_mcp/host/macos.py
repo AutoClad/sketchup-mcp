@@ -241,13 +241,12 @@ def _instances(exe, port):
         if len(parts) == 3 and parts[0].isdigit() and runs_exe(parts[2]):
             commands[int(parts[0])] = (int(parts[1]), parts[2].rstrip())
     found = []
-    for line in _ps("axeww", "-o", "pid=,command=").splitlines():
-        pid, _, text = line.strip().partition(" ")
-        if pid.isdigit() and int(pid) in commands:
-            command = commands[int(pid)][1]
-            text = text.strip()
-            if text.startswith(command) and ours.search(text[len(command) :]):
-                found.append(int(pid))
+    for pid, (_, command) in commands.items():
+        # One process at a time: a value in its environment may have a line
+        # break in it.
+        text = _ps("eww", "-o", "command=", "-p", str(pid)).strip()
+        if text.startswith(command) and ours.search(text[len(command) :]):
+            found.append(pid)
     return [pid for pid in found if commands[pid][0] not in found]
 
 
@@ -263,6 +262,9 @@ def start(r, src, exe, template, pool_dir, pool_file):
     # when the process that started it ended before writing it down.
     for pid in _instances(exe, r["port"]):
         kill(pid)
+    # Any still there (one just killed may take a moment to go) isn't the
+    # one about to be started.
+    before = set(_instances(exe, r["port"]))
 
     model = Path(r["model"])
     model.parent.mkdir(parents=True, exist_ok=True)
@@ -298,7 +300,7 @@ def start(r, src, exe, template, pool_dir, pool_file):
     while True:
         for pid in _instances(exe, r["port"]):
             started = process_started(pid)
-            if started is not None:
+            if pid not in before and started is not None:
                 return pid, started
         if time.time() > deadline:
             raise PoolError(

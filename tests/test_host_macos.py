@@ -380,18 +380,21 @@ def test_an_instance_is_found_by_its_program_and_the_port_in_its_environment(tmp
     port, other = free_ports(2)
 
     def run(command, port):
-        return subprocess.Popen(command, env={**os.environ, "SKETCHUP_MCP_PORT": str(port)})
+        env = {**os.environ, "A_VALUE_ON\nTWO_LINES": "one\ntwo", "SKETCHUP_MCP_PORT": str(port)}
+        return subprocess.Popen(command, env=env)
 
     started = [
         run([str(program), "a model.skp"], port),
-        # The same program for another port, and another program that has
-        # the port in its environment, and both in its arguments.
+        # The same program for another port, with this port only in its arguments.
+        run([str(program), f"SKETCHUP_MCP_PORT={port}"], other),
         run([str(program)], other),
+        # Another program that has the port in its environment, and both in
+        # its arguments.
         run([sys.executable, "-c", "import time; time.sleep(120)", str(program), f"SKETCHUP_MCP_PORT={port}"], port),
     ]
     try:
         assert wait_for(lambda: macos._instances(program, port) == [started[0].pid]), macos._instances(program, port)
-        assert macos._instances(program, other) == [started[1].pid]
+        assert sorted(macos._instances(program, other)) == sorted([started[1].pid, started[2].pid])
         assert macos._instances(program, free_ports(1)[0]) == []
     finally:
         for proc in started:
