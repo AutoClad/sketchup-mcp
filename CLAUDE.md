@@ -32,7 +32,7 @@ real program started in SketchUp's place), so each runs only where it can;
 Linux runs the macOS ones. `tests/conftest.py` puts stand-ins in place of
 `msvcrt` and `ctypes.WinDLL` off Windows, so that tests of Windows' rules
 can load `host/windows.py` anywhere. The tests of the Ruby server
-(`tests/test_bridge_server.py`) need `ruby` on the path and are skipped
+(`tests/test_bridge_server.py`) need Ruby 3 or later on the path and are skipped
 without it.
 
 ## Protocol
