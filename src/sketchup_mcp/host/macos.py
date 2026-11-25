@@ -1,24 +1,41 @@
 """The pool on macOS: see the package's notes for what each name is.
 
-Nothing here is particular to macOS but the paths, so Linux uses it too:
-there is no SketchUp for Linux to start, but the package loads there and
-the tests run there.
+Nothing here is particular to macOS but the paths and how SketchUp is
+started, so Linux uses it too: there is no SketchUp for Linux to start, but
+the package loads there and most of the tests run there.
 
-SketchUp is started by running the program inside its app bundle, not with
-`open`: the environment set here reaches it as it is, and its pid is known
-at once, which `open` doesn't give. (`open -n --env NAME=value` passes the
-environment through too; tried with a stand-in app on macOS 26.) It is
-started through a shell that puts it in the background and exits, so it
-belongs to no MCP server: it outlives the session that started it, and when
-it ends it leaves no zombie behind for the pool to mistake for a running
-SketchUp.
+SketchUp is started with `open`, as the Finder would start it, on its model.
+Run directly (the program inside the bundle, with the model as its
+argument) it opens the model but loads no extensions, so nothing ever
+listens on its port. What was measured, with SketchUp 2026 (26.2.242) on
+macOS 27.2, 2026-11-25:
 
-Not yet tried against a real SketchUp on a Mac.
+* `open -n -F -a <bundle> --env NAME=value <model>` works: the extension
+  listens 3 to 4 s later, and two such instances run side by side.
+* `-n` starts a new SketchUp though one is running.
+* `-F` is needed: without it, a SketchUp started after another was killed
+  brings back that one's window too, and its active model is the dead
+  one's.
+* `-g` (start in the background) can't be used: the extension never
+  listens. So each start comes to the front.
+* A SketchUp with an unsaved change doesn't quit when asked (it stops at
+  its save prompt), and one stopped at a dialog ignores the request too:
+  hence kill's wait and SIGKILL.
+
+Started this way, the pool leased real SketchUps on that Mac the same day:
+two at once, and one restarted after being killed with an unsaved change.
+
+`open` doesn't say which process it started. It is found by what only it
+has: it runs SketchUp's program, with this instance's port in its
+environment (see _instances), which `ps` shows for the user's own
+processes. It belongs to launchd, not to the MCP server: it outlives the
+session that started it, and leaves no zombie behind when it ends.
 """
 
 import calendar
 import fcntl
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -39,8 +56,8 @@ SKETCHUP_EXE = "/Applications/SketchUp 2026/SketchUp.app/Contents/MacOS/SketchUp
 
 START_LOG_HINT = "If it crashed, macOS keeps a report in ~/Library/Logs/DiagnosticReports."
 
-# How long SketchUp gets to quit when asked, before it's killed. It
-# sometimes ignores the request.
+# How long SketchUp gets to quit when asked, before it's killed. It ignores
+# the request when it has an unsaved change, or is stopped at a dialog.
 QUIT_WAIT = 5.0
 KILLED_WITH = f"being asked to quit and then, {QUIT_WAIT:g} s later, SIGKILL"
 
@@ -182,51 +199,116 @@ def make_shared_dir(folder):
 
 # --- Starting SketchUp -------------------------------------------------------
 
-# What a pool instance's SketchUp is told through its environment. Any of
-# these set for this process is not passed on.
+# What a pool instance's SketchUp is told through its environment. `open`
+# passes its own environment on, so any of these set for this process is
+# taken out of it first.
 _OURS = ("SKETCHUP_MCP_PORT", "SKETCHUP_MCP_BIND", "SHELLIFY_SRC", "SKETCHUP_MCP_POOL_FILE")
 
-# Runs "$0" "$@" in the background, cut off from this process, and prints
-# its pid.
-_DETACH = '"$0" "$@" </dev/null >/dev/null 2>&1 & echo $!'
+# How long the SketchUp that `open` started may take to show among the
+# processes. It is there by the time `open` returns, as a rule.
+FIND_WAIT = 20.0
+
+
+def _bundle(exe):
+    """The app bundle that the program exe is in."""
+    for folder in Path(exe).parents:
+        if folder.suffix == ".app":
+            return folder
+    raise PoolError(
+        f"{exe} isn't inside an app bundle. SKETCHUP_EXE names the program in it, "
+        "as in /Applications/SketchUp 2026/SketchUp.app/Contents/MacOS/SketchUp"
+    )
+
+
+def _instances(exe, port):
+    """The pids of the SketchUps (the program exe) started for port: the
+    processes whose command line starts with exe (or with an interpreter
+    and then exe, for a script) and that have SKETCHUP_MCP_PORT=<port> in
+    their environment. One, as a rule; a process SketchUp itself started
+    inherits its environment, so of a parent and its child only the parent
+    is given.
+
+    ps gives a process's environment (its `e`) only on the end of its
+    command line, so the command line is read without it too, to tell the
+    two apart. It gives the environment of the user's own processes only.
+    """
+    paths = (str(exe), os.path.realpath(exe))
+
+    def runs_exe(command):
+        return command.startswith(paths) or command.partition(" ")[2].startswith(paths)
+
+    ours = re.compile(rf"(^|\s)SKETCHUP_MCP_PORT={int(port)}(\s|$)")
+    commands = {}
+    for line in _ps("-axww", "-o", "pid=,ppid=,args=").splitlines():
+        parts = line.split(None, 2)
+        if len(parts) == 3 and parts[0].isdigit() and runs_exe(parts[2]):
+            commands[int(parts[0])] = (int(parts[1]), parts[2].rstrip())
+    found = []
+    for pid, (_, command) in commands.items():
+        # One process at a time: a value in its environment may have a line
+        # break in it.
+        text = _ps("eww", "-o", "command=", "-p", str(pid)).strip()
+        if text.startswith(command) and ours.search(text[len(command) :]):
+            found.append(pid)
+    return [pid for pid in found if commands[pid][0] not in found]
 
 
 def start(r, src, exe, template, pool_dir, pool_file):
-    """Starts SketchUp (exe) for instance r on a new copy of template, so
-    that it outlives the process that started it. Returns (pid, start time).
-    pool_file is where the extension reads its lease."""
+    """Starts SketchUp (the program exe, in its app bundle) for instance r
+    on a new copy of template, so that it outlives the process that started
+    it. Returns (pid, start time). pool_file is where the extension reads
+    its lease."""
+    if sys.platform != "darwin":
+        raise PoolError("There is no SketchUp to start on this system: the pool starts it on Windows and macOS")
+    bundle = _bundle(exe)
+    # A SketchUp started for this port that the pool has no record of, as
+    # when the process that started it ended before writing it down.
+    for pid in _instances(exe, r["port"]):
+        kill(pid)
+    # Any still there (one just killed may take a moment to go) isn't the
+    # one about to be started.
+    before = set(_instances(exe, r["port"]))
+
     model = Path(r["model"])
     model.parent.mkdir(parents=True, exist_ok=True)
-    # What an earlier SketchUp left beside the model, so this one doesn't
-    # stop to offer it back. Where SketchUp 2026 keeps these on macOS hasn't
-    # been checked; these are the names it has used beside a model.
+    # What an earlier SketchUp may have left beside the model, so this one
+    # doesn't stop to offer it back. None was seen after a SketchUp was
+    # killed within a minute of a change; one killed after its autosave
+    # interval wasn't tried, and these are the names SketchUp has used.
     for leftover in (model.with_name(f"AutoSave_{model.name}"), model.with_suffix(".skb")):
         leftover.unlink(missing_ok=True)
     shutil.copyfile(template, model)
 
-    env = {name: value for name, value in os.environ.items() if name not in _OURS}
-    env["SKETCHUP_MCP_PORT"] = str(r["port"])
-    # Where the extension reads its lease, for its badge in the viewport.
-    env["SKETCHUP_MCP_POOL_FILE"] = str(pool_file)
+    tell = {"SKETCHUP_MCP_PORT": str(r["port"]), "SKETCHUP_MCP_POOL_FILE": str(pool_file)}
     if src:
-        env["SHELLIFY_SRC"] = src
+        tell["SHELLIFY_SRC"] = src
+    command = ["open", "-n", "-F", "-a", str(bundle)]
+    for name, value in tell.items():
+        command += ["--env", f"{name}={value}"]
     try:
         done = subprocess.run(
-            ["/bin/sh", "-c", _DETACH, str(exe), str(model)],
-            env=env,
-            cwd=str(Path(exe).parent),
+            [*command, str(model)],
+            env={name: value for name, value in os.environ.items() if name not in _OURS},
             stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
-            start_new_session=True,
-            timeout=30,
+            timeout=60,
         )
-        pid = int(done.stdout.strip())
-    except (OSError, ValueError, subprocess.TimeoutExpired) as e:
+    except (OSError, subprocess.TimeoutExpired) as e:
         raise PoolError(f"Starting SketchUp failed: {type(e).__name__}: {e}")
-    # Long enough for a program that can't be run at all to have gone.
-    time.sleep(0.3)
-    started = process_started(pid)
-    if started is None:
-        raise PoolError("SketchUp exited straight away")
-    return pid, started
+    if done.returncode != 0:
+        raise PoolError(f"Starting SketchUp failed: open said: {(done.stderr or done.stdout).strip()}")
+
+    deadline = time.time() + FIND_WAIT
+    while True:
+        for pid in _instances(exe, r["port"]):
+            started = process_started(pid)
+            if pid not in before and started is not None:
+                return pid, started
+        if time.time() > deadline:
+            raise PoolError(
+                f"SketchUp was opened for port {r['port']}, but no process of {exe} with that port in its "
+                f"environment showed within {FIND_WAIT:g} s: it exited straight away, or ps doesn't show it. "
+                f"{START_LOG_HINT}"
+            )
+        time.sleep(0.2)

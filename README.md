@@ -187,18 +187,37 @@ The pool's rules are the same. What differs is in
   each instance's model is in `models/` beside it.
 * SketchUp is `/Applications/SketchUp 2026/SketchUp.app`, unless
   `SKETCHUP_EXE` names the program inside another bundle
-  (`.../SketchUp.app/Contents/MacOS/SketchUp`). Each instance is that
-  program run on its model, with its port and source folder in its
-  environment, detached from the MCP server that started it.
+  (`.../SketchUp.app/Contents/MacOS/SketchUp`). Each instance is started
+  with `open -n -F` on its model, with its port and source folder in its
+  environment, and belongs to no MCP server. Run directly, the program
+  loads no extensions.
+* Each SketchUp comes to the front as it starts, taking the keyboard from
+  whatever you were typing in: started in the background, it loads no
+  extensions either.
 * Ending one asks it to quit and kills it five seconds later if it's still
-  there.
+  there, as it is when it has an unsaved change.
 * Register the server with Claude Code at user scope, as on Windows:
   `claude mcp add --scope user sketchup -- uv --directory <this checkout> run sketchup-mcp`.
 
-This has been run against a stand-in program only (`tests/test_host_macos.py`),
-never a real SketchUp on a Mac. Not yet known there: whether SketchUp opens
-a model named on its command line, what it shows after one was killed, and
-where it keeps autosaves.
+It has leased real SketchUps on one Mac (arm64, macOS 27.2, SketchUp 2026
+26.2.242, 2026-11-25), through the `sketchup-launcher` CLI: two at once,
+each ready 3 to 4 s after its start, on its own model with its own source
+folder; a lease kept, released and taken up again by another holder with
+no restart; and one killed with an unsaved change, restarted clean by the
+next lease. The tests run the same code against a stand-in program
+(`tests/test_host_macos.py`).
+
+Not yet tried: a lease through the MCP server rather than the CLI, a
+server the Claude desktop app starts from its own config, four instances
+at once, and a SketchUp killed after its autosave interval.
+
+An open point: after the pool's SketchUps have been killed, the next
+SketchUp started by hand (opened on a model in the ordinary way) may stop
+at an alert before it loads its extensions. Seen twice on that Mac, after
+two pool instances had been killed and the pool's folder deleted; ending
+that SketchUp cleared it, and the start after it was clean. What the alert
+says and what causes it aren't known, and it didn't happen again with one
+instance.
 
 ### Example Commands
 
