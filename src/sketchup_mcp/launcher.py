@@ -46,21 +46,19 @@ Windows only, like SketchUp 2026.
 """
 
 import argparse
-import ctypes
 import json
-import msvcrt
 import os
-import shutil
 import socket
-import subprocess
 import sys
 import time
 from contextlib import contextmanager
-from ctypes import wintypes
 from datetime import datetime, timezone
 from pathlib import Path
 
-POOL_DIR = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "sketchup-mcp"
+from .host import PoolError
+from .host import windows as _os
+
+POOL_DIR = _os.DATA_DIR / "sketchup-mcp"
 POOL_FILE = POOL_DIR / "pool.json"
 LOCK_FILE = POOL_DIR / "pool.lock"
 MODELS_DIR = POOL_DIR / "models"
@@ -71,8 +69,7 @@ MODELS_DIR = POOL_DIR / "models"
 PORTS = [9877, 9878, 9879, 9880]
 HOST = "127.0.0.1"
 
-SKETCHUP_EXE = Path(os.environ.get(
-    "SKETCHUP_EXE", r"C:\Program Files\SketchUp\SketchUp 2026\SketchUp\SketchUp.exe"))
+SKETCHUP_EXE = Path(os.environ.get("SKETCHUP_EXE", _os.SKETCHUP_EXE))
 
 # Copied for each instance as it starts. By default an empty model shipped
 # with the package, so a fresh instance has nothing in it but what its
@@ -81,125 +78,23 @@ SKETCHUP_EXE = Path(os.environ.get(
 TEMPLATE = Path(os.environ.get(
     "SKETCHUP_POOL_TEMPLATE", str(Path(__file__).with_name("empty.skp"))))
 
-# SketchUp 2026 autosaves to this folder, keyed by the model's file name
-# only, and after a crash asks whether to open the "recovered version"
-# before its extensions load, so nothing answers on the port. The model
-# copy's file there is deleted before every start.
-AUTOSAVE_DIR = (Path(os.environ.get("LOCALAPPDATA", str(Path.home())))
-                / "SketchUp" / "SketchUp 2026" / "SketchUp" / "working")
-
 # How long a start may take before the lease gives up. SketchUp listens about
 # 10-15 s after launch when it's alone; four starting at once take longer.
 START_TIMEOUT = float(os.environ.get("SKETCHUP_POOL_START_TIMEOUT", "180"))
 LOCK_TIMEOUT = 30.0
 
 
-class PoolError(Exception):
-    """A lease or release that can't be done, with why."""
-
-
 # --- Processes ---------------------------------------------------------------
 
-_kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-_kernel32.OpenProcess.restype = wintypes.HANDLE
-_kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
-_kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
-_kernel32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
-_kernel32.GetProcessTimes.argtypes = [wintypes.HANDLE] + [ctypes.POINTER(wintypes.FILETIME)] * 4
-_kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
-_kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
-
-PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-STILL_ACTIVE = 259
-TH32CS_SNAPPROCESS = 0x2
-INVALID_HANDLE_VALUE = wintypes.HANDLE(-1).value
-
-
-class _PROCESSENTRY32W(ctypes.Structure):
-    _fields_ = [
-        ("dwSize", wintypes.DWORD),
-        ("cntUsage", wintypes.DWORD),
-        ("th32ProcessID", wintypes.DWORD),
-        ("th32DefaultHeapID", ctypes.c_void_p),
-        ("th32ModuleID", wintypes.DWORD),
-        ("cntThreads", wintypes.DWORD),
-        ("th32ParentProcessID", wintypes.DWORD),
-        ("pcPriClassBase", ctypes.c_long),
-        ("dwFlags", wintypes.DWORD),
-        ("szExeFile", wintypes.WCHAR * 260),
-    ]
-
-
-def process_started(pid):
-    """When a running process started, in seconds since the epoch, or None
-    if it isn't running. A pid with the start time recorded for it is the
-    same process; Windows reuses pids."""
-    if not pid:
-        return None
-    handle = _kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, int(pid))
-    if not handle:
-        return None
-    try:
-        code = wintypes.DWORD()
-        if not _kernel32.GetExitCodeProcess(handle, ctypes.byref(code)) or code.value != STILL_ACTIVE:
-            return None
-        times = [wintypes.FILETIME() for _ in range(4)]
-        if not _kernel32.GetProcessTimes(handle, *[ctypes.byref(t) for t in times]):
-            return None
-        created = (times[0].dwHighDateTime << 32) | times[0].dwLowDateTime
-        # FILETIME counts 100 ns ticks from 1601.
-        return round(created / 1e7 - 11644473600, 3)
-    finally:
-        _kernel32.CloseHandle(handle)
+process_started = _os.process_started
+image_path = _os.image_path
+PYTHON_LAUNCHERS = _os.PYTHON_LAUNCHERS
 
 
 def is_running(pid, started):
     """Whether the process recorded as pid, started at started, still runs."""
     now = process_started(pid)
     return now is not None and started is not None and abs(now - started) < 0.01
-
-
-def _processes():
-    """{pid: (parent pid, exe name)} for every process."""
-    snapshot = _kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
-    if snapshot == INVALID_HANDLE_VALUE:
-        return {}
-    found = {}
-    try:
-        entry = _PROCESSENTRY32W()
-        entry.dwSize = ctypes.sizeof(entry)
-        ok = _kernel32.Process32FirstW(snapshot, ctypes.byref(entry))
-        while ok:
-            found[entry.th32ProcessID] = (entry.th32ParentProcessID, entry.szExeFile)
-            ok = _kernel32.Process32NextW(snapshot, ctypes.byref(entry))
-    finally:
-        _kernel32.CloseHandle(snapshot)
-    return found
-
-
-_kernel32.QueryFullProcessImageNameW.argtypes = [
-    wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD)]
-
-
-def image_path(pid):
-    """The full path of a running process's program, or None."""
-    handle = _kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, int(pid))
-    if not handle:
-        return None
-    try:
-        size = wintypes.DWORD(32768)
-        buffer = ctypes.create_unicode_buffer(size.value)
-        if not _kernel32.QueryFullProcessImageNameW(handle, 0, buffer, ctypes.byref(size)):
-            return None
-        return buffer.value
-    finally:
-        _kernel32.CloseHandle(handle)
-
-
-# Programs that start Python for something else (a venv's python.exe runs
-# the real interpreter as its child): the process that started the MCP
-# server is the first ancestor that isn't one of them.
-PYTHON_LAUNCHERS = {"python.exe", "pythonw.exe", "py.exe", "uv.exe", "uvx.exe"}
 
 
 def shared_server(pid=None, table=None, path_of=image_path):
@@ -215,7 +110,7 @@ def shared_server(pid=None, table=None, path_of=image_path):
     Claude Code process, and one run from a terminal by that terminal's
     program.
     """
-    table = _processes() if table is None else table
+    table = _os.processes() if table is None else table
     pid = pid or os.getpid()
     seen = set()
     while pid in table and pid not in seen:
@@ -228,8 +123,7 @@ def shared_server(pid=None, table=None, path_of=image_path):
             break
     else:
         return None
-    path = (path_of(pid) or "").replace("/", "\\").lower()
-    if "\\windowsapps\\claude_" not in path:
+    if not _os.is_desktop_app(path_of(pid)):
         return None
     return (
         "This SketchUp MCP server was started by the Claude desktop app itself (it's in the "
@@ -257,9 +151,9 @@ def calling_shell():
     child, so Python's parent is that .exe, which exits with it. Go past it,
     and past a py.exe or python.exe that ran `python -m`.
     """
-    table = _processes()
+    table = _os.processes()
     pid = os.getpid()
-    skip = {"sketchup-launcher.exe", "python.exe", "pythonw.exe", "py.exe"}
+    skip = _os.CLI_WRAPPERS
     while True:
         parent, _ = table.get(pid, (0, ""))
         if not parent or parent not in table:
@@ -269,58 +163,16 @@ def calling_shell():
             return pid
 
 
-_advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
-_userenv = ctypes.WinDLL("userenv", use_last_error=True)
-_kernel32.GetCurrentProcess.restype = wintypes.HANDLE
-_advapi32.OpenProcessToken.argtypes = [wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE)]
-_userenv.CreateEnvironmentBlock.argtypes = [ctypes.POINTER(ctypes.c_void_p), wintypes.HANDLE, wintypes.BOOL]
-_userenv.DestroyEnvironmentBlock.argtypes = [ctypes.c_void_p]
-TOKEN_QUERY = 0x0008
-TOKEN_DUPLICATE = 0x0002
-
-
-def user_environment():
-    """The user's own environment, as Explorer gives a program started from
-    the Start menu: the system's and the user's variables, from the registry.
-    Not this process's: an MCP client may start its server with only a few
-    variables (the Python SDK's stdio client passes about a dozen), and
-    SketchUp started with those hangs before showing its window."""
-    token = wintypes.HANDLE()
-    if not _advapi32.OpenProcessToken(_kernel32.GetCurrentProcess(), TOKEN_QUERY | TOKEN_DUPLICATE,
-                                      ctypes.byref(token)):
-        raise ctypes.WinError(ctypes.get_last_error())
-    block = ctypes.c_void_p()
-    try:
-        if not _userenv.CreateEnvironmentBlock(ctypes.byref(block), token, False):
-            raise ctypes.WinError(ctypes.get_last_error())
-        env = {}
-        address = block.value
-        while True:
-            entry = ctypes.wstring_at(address)
-            if not entry:
-                break
-            address += (len(entry) + 1) * ctypes.sizeof(ctypes.c_wchar)
-            name, sep, value = entry.partition("=")
-            # Entries such as "=C:=C:\" hold a drive's current folder.
-            if sep and name:
-                env[name] = value
-        return env
-    finally:
-        if block.value:
-            _userenv.DestroyEnvironmentBlock(block)
-        _kernel32.CloseHandle(token)
-
-
 def _kill(pid, started):
     """Ends a pool instance's SketchUp, if it's still the one recorded, and
     waits for it to go. Its model is a throwaway copy."""
     if not is_running(pid, started):
         return
-    subprocess.run(["taskkill", "/F", "/PID", str(pid)], stdin=subprocess.DEVNULL, capture_output=True)
+    _os.kill(pid)
     deadline = time.time() + 15
     while is_running(pid, started):
         if time.time() > deadline:
-            raise PoolError(f"SketchUp (pid {pid}) didn't exit after taskkill")
+            raise PoolError(f"SketchUp (pid {pid}) didn't exit after {_os.KILLED_WITH}")
         time.sleep(0.2)
 
 
@@ -335,8 +187,7 @@ def _locked():
         deadline = time.time() + LOCK_TIMEOUT
         while True:
             try:
-                f.seek(0)
-                msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+                _os.lock(f)
                 break
             except OSError:
                 if time.time() > deadline:
@@ -345,27 +196,16 @@ def _locked():
         try:
             yield
         finally:
-            f.seek(0)
-            msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
+            _os.unlock(f)
 
 
 def _ensure_pool_dir():
-    """Creates the pool's folder where every process sees it. Created from
-    a packaged app's process (a Claude session's MCP server), it would go to
-    the package's private copy of %LOCALAPPDATA% (see the module's notes),
-    so it's made by a process WMI starts, which is outside any package."""
+    """Creates the pool's folder where every process sees it, which on
+    Windows takes more than a mkdir (see the system's make_shared_dir)."""
     if POOL_DIR.is_dir():
         return
-    path = str(POOL_DIR).replace("'", "''")
-    subprocess.run(
-        ["powershell", "-NoProfile", "-NonInteractive", "-Command",
-         "Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments "
-         f"@{{ CommandLine = 'cmd /c mkdir \"{path}\"' }} | Out-Null"],
-        stdin=subprocess.DEVNULL, capture_output=True, timeout=60)
-    deadline = time.time() + 10
-    while not POOL_DIR.is_dir() and time.time() < deadline:
-        time.sleep(0.2)
-    # Without WMI, at least work for this process and its package.
+    _os.make_shared_dir(POOL_DIR)
+    # If that didn't do it, at least work for this process.
     POOL_DIR.mkdir(parents=True, exist_ok=True)
 
 
@@ -470,18 +310,6 @@ def _same_src(a, b):
 
 # --- Starting SketchUp -------------------------------------------------------
 
-def _delete_autosave(model):
-    """Deletes the model copy's autosave, so SketchUp doesn't stop at the
-    "recovered version" dialog. -LiteralPath, so the name isn't a pattern.
-    Run by spawn, outside the package, so it's SketchUp's real file."""
-    path = str(AUTOSAVE_DIR / Path(model).name).replace("'", "''")
-    subprocess.run(
-        ["powershell", "-NoProfile", "-NonInteractive", "-Command",
-         f"Remove-Item -LiteralPath '{path}' -Force -ErrorAction SilentlyContinue"],
-        stdin=subprocess.DEVNULL, capture_output=True,
-    )
-
-
 def _port_open(port):
     try:
         with socket.create_connection((HOST, port), timeout=0.5):
@@ -500,126 +328,7 @@ def _launch(r, src):
     if _port_open(r["port"]):
         raise PoolError(f"Something not in the pool already listens on port {r['port']}")
 
-    # Started by a scheduled task of the instance's own, not as a child of
-    # this process. An MCP client may run its server in a job object that
-    # kills the server's children when it closes and allows no breaking away
-    # (the Python SDK's stdio client does), which would take SketchUp down
-    # with the session that started it. Task Scheduler starts the task on
-    # the user's desktop, outside that job, as the "Start SketchUp" task
-    # does for the default SketchUp. (WMI's Win32_Process.Create escapes the
-    # job too, but SketchUp started by it never showed a window or listened,
-    # 2026-10-22: it was outside the package too, and couldn't see the model
-    # copy, which was inside.) The task runs `sketchup-launcher spawn`, which
-    # copies the model, sets the environment, starts SketchUp and writes its
-    # pid back.
-    request = POOL_DIR / f"start-{r['name']}.json"
-    result = POOL_DIR / f"started-{r['name']}.json"
-    result.unlink(missing_ok=True)
-    request.write_text(json.dumps({
-        "exe": str(SKETCHUP_EXE), "template": str(TEMPLATE), "model": r["model"],
-        "port": r["port"], "src": src, "result": str(result),
-    }), encoding="utf-8")
-    task = f"SketchUp pool {r['name']}"
-    _create_task(task, request)
-    done = subprocess.run(["schtasks", "/run", "/tn", task],
-                          stdin=subprocess.DEVNULL, capture_output=True, text=True)
-    if done.returncode != 0:
-        raise PoolError(f"Running the task '{task}' failed: {done.stdout.strip()} {done.stderr.strip()}")
-    deadline = time.time() + 60
-    while not result.exists():
-        if time.time() > deadline:
-            raise PoolError(f"The task '{task}' didn't start SketchUp within 60 s")
-        time.sleep(0.2)
-    time.sleep(0.1)
-    started = json.loads(result.read_text(encoding="utf-8"))
-    result.unlink(missing_ok=True)
-    if "error" in started:
-        raise PoolError(f"Starting SketchUp failed: {started['error']}")
-    return started["pid"], started["started"]
-
-
-def _create_task(task, request):
-    """Creates (or replaces) the scheduled task that starts an instance:
-    run on demand only, as the logged-on user, on their desktop, with no
-    time limit (the default is 72 hours) and not stopped on battery."""
-    pythonw = Path(sys.executable).with_name("pythonw.exe")
-    if not pythonw.exists():
-        pythonw = Path(sys.executable)
-    args = f'-m sketchup_mcp.launcher spawn "{request}"'
-    xml = f"""<?xml version="1.0" encoding="UTF-16"?>
-<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
-  <RegistrationInfo><Description>Starts a SketchUp of the sketchup-mcp pool; see sketchup_mcp/launcher.py.</Description></RegistrationInfo>
-  <Principals><Principal id="Author"><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>
-  <Settings>
-    <MultipleInstancesPolicy>Parallel</MultipleInstancesPolicy>
-    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
-    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
-    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
-    <Enabled>true</Enabled>
-  </Settings>
-  <Actions Context="Author"><Exec><Command>{_xml(str(pythonw))}</Command><Arguments>{_xml(args)}</Arguments></Exec></Actions>
-</Task>"""
-    # One file per task: two leases may be creating tasks at once.
-    path = POOL_DIR / f"{task}.xml"
-    path.write_text(xml, encoding="utf-16")
-    try:
-        done = subprocess.run(["schtasks", "/create", "/tn", task, "/xml", str(path), "/f"],
-                              stdin=subprocess.DEVNULL, capture_output=True, text=True)
-    finally:
-        path.unlink(missing_ok=True)
-    if done.returncode != 0:
-        raise PoolError(f"Creating the task '{task}' failed: {done.stdout.strip()} {done.stderr.strip()}")
-
-
-def _xml(text):
-    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-
-
-def spawn(request):
-    """Run by an instance's scheduled task: starts SketchUp on the request's
-    model, and writes {"pid", "started"} or {"error"} to its result file."""
-    req = json.loads(Path(request).read_text(encoding="utf-8"))
-    out = Path(req["result"])
-    try:
-        model = Path(req["model"])
-        model.parent.mkdir(parents=True, exist_ok=True)
-        _delete_autosave(model)
-        shutil.copyfile(req["template"], model)
-        model.with_suffix(".skb").unlink(missing_ok=True)
-        # The user's own environment, with this instance's port and source.
-        # Names are case-insensitive on Windows; drop any spelling of these.
-        env = {k: v for k, v in user_environment().items()
-               if k.upper() not in ("SKETCHUP_MCP_PORT", "SKETCHUP_MCP_BIND", "SHELLIFY_SRC",
-                                    "SKETCHUP_MCP_POOL_FILE")}
-        env["SKETCHUP_MCP_PORT"] = str(req["port"])
-        # Where the extension reads its lease, for its badge in the viewport.
-        env["SKETCHUP_MCP_POOL_FILE"] = str(POOL_FILE)
-        if req["src"]:
-            env["SHELLIFY_SRC"] = req["src"]
-        # Shown without taking the focus from whatever the user is doing.
-        # Never minimized: SketchUp draws and picks only in a window that's
-        # shown.
-        startup = subprocess.STARTUPINFO()
-        startup.dwFlags = subprocess.STARTF_USESHOWWINDOW
-        startup.wShowWindow = 4  # SW_SHOWNOACTIVATE
-        args = dict(env=env, cwd=str(Path(req["exe"]).parent), startupinfo=startup, close_fds=True,
-                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        flags = subprocess.CREATE_NEW_PROCESS_GROUP
-        try:
-            # Out of the task's job too, where it allows that.
-            proc = subprocess.Popen([req["exe"], req["model"]],
-                                    creationflags=flags | subprocess.CREATE_BREAKAWAY_FROM_JOB, **args)
-        except OSError:
-            proc = subprocess.Popen([req["exe"], req["model"]], creationflags=flags, **args)
-        started = process_started(proc.pid)
-        if started is None:
-            raise PoolError(f"SketchUp exited straight away (exit code {proc.poll()})")
-        reply = {"pid": proc.pid, "started": started}
-    except Exception as e:
-        reply = {"error": f"{type(e).__name__}: {e}"}
-    tmp = out.with_suffix(".tmp")
-    tmp.write_text(json.dumps(reply), encoding="utf-8")
-    os.replace(tmp, out)
+    return _os.start(r, src, SKETCHUP_EXE, TEMPLATE, POOL_DIR, POOL_FILE)
 
 
 def eval_ruby(port, code, timeout=5.0):
@@ -700,8 +409,7 @@ def _wait_ready(r):
     while time.time() < deadline:
         if not _alive(r):
             raise PoolError(
-                f"{r['name']}'s SketchUp (pid {r['pid']}) exited while starting. Its log is "
-                "entlog-sketchup.txt in %LOCALAPPDATA%\\SketchUp\\SketchUp 2026.")
+                f"{r['name']}'s SketchUp (pid {r['pid']}) exited while starting. {_os.START_LOG_HINT}")
         try:
             pid = ask_pid(r["port"])
             if pid == r["pid"]:
@@ -1016,7 +724,7 @@ def main(argv=None):
     args = parser.parse_args(argv)
 
     if args.command == "spawn":
-        spawn(args.request)
+        _os.spawn(args.request, POOL_FILE)
         return 0
 
     try:
