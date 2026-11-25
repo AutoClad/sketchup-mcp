@@ -21,7 +21,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, macos-latest]
+        # macos-15-intel, not macos-latest: on 2026-11-25 GitHub had no
+        # macOS arm64 runners to give ("capacity constraints"), and a job
+        # for one was cancelled after 15 minutes in the queue. Nothing here
+        # depends on the processor.
+        os: [windows-latest, macos-15-intel]
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v9.0.0
