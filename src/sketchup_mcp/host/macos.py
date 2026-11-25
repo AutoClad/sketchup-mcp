@@ -22,6 +22,9 @@ macOS 27.2, 2026-11-25:
   its save prompt), and one stopped at a dialog ignores the request too:
   hence kill's wait and SIGKILL.
 
+Started this way, the pool leased real SketchUps on that Mac the same day:
+two at once, and one restarted after being killed with an unsaved change.
+
 `open` doesn't say which process it started. It is found by what only it
 has: it runs SketchUp's program, with this instance's port in its
 environment (see _instances), which `ps` shows for the user's own

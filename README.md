@@ -199,11 +199,25 @@ The pool's rules are the same. What differs is in
 * Register the server with Claude Code at user scope, as on Windows:
   `claude mcp add --scope user sketchup -- uv --directory <this checkout> run sketchup-mcp`.
 
-How SketchUp is started was worked out by hand with SketchUp 2026 on one
-Mac (the notes at the top of `host/macos.py` say what was measured). The
-tests run it against a stand-in program only (`tests/test_host_macos.py`).
-Not yet tried: a server the Claude desktop app starts from its own config,
-and a SketchUp killed after its autosave interval.
+It has leased real SketchUps on one Mac (arm64, macOS 27.2, SketchUp 2026
+26.2.242, 2026-11-25), through the `sketchup-launcher` CLI: two at once,
+each ready 3 to 4 s after its start, on its own model with its own source
+folder; a lease kept, released and taken up again by another holder with
+no restart; and one killed with an unsaved change, restarted clean by the
+next lease. The tests run the same code against a stand-in program
+(`tests/test_host_macos.py`).
+
+Not yet tried: a lease through the MCP server rather than the CLI, a
+server the Claude desktop app starts from its own config, four instances
+at once, and a SketchUp killed after its autosave interval.
+
+An open point: after the pool's SketchUps have been killed, the next
+SketchUp started by hand (opened on a model in the ordinary way) may stop
+at an alert before it loads its extensions. Seen twice on that Mac, after
+two pool instances had been killed and the pool's folder deleted; ending
+that SketchUp cleared it, and the start after it was clean. What the alert
+says and what causes it aren't known, and it didn't happen again with one
+instance.
 
 ### Example Commands
 

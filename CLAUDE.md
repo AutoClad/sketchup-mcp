@@ -15,8 +15,8 @@ are the same on both. What differs (the lock, finding processes, starting
 and ending SketchUp, the paths) is in `src/sketchup_mcp/host/`, one module
 per system with the same names in each; `host/__init__.py` lists them. The
 macOS module starts SketchUp with `open -n -F`, never by running its program
-directly and never with `-g` (either way it loads no extensions); its tests
-run against a stand-in program, never a real SketchUp.
+directly and never with `-g` (either way it loads no extensions). It has leased real SketchUps on one
+Mac, by hand; its tests run against a stand-in program.
 The Ruby extension runs wherever SketchUp does, and a SketchUp started by
 hand listens on 9876, which the MCP server doesn't use.
 
