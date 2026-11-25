@@ -2,11 +2,12 @@
 name, port or the session that last used it, and switching its source.
 
 Nothing here starts SketchUp or talks to one: processes, starting and
-switch_src are replaced. Run from the checkout whose code you mean to test
-(src first on the path, since the venv's editable install is the main
-checkout's):
+switch_src are replaced. Run from the checkout whose code you mean to test:
 
-    $env:PYTHONPATH = "$PWD\\src"; ~/source/sketchup-mcp/.venv/Scripts/python -m unittest discover -s tests
+    uv run pytest
+
+which puts that checkout's src first on the path (pyproject.toml), whatever
+the venv has installed.
 """
 
 import json
