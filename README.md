@@ -167,9 +167,8 @@ instructions tell every session these rules.
 * `sketchup-launcher status | lease --src <folder> [--label <text>] [--instance <name>] | release`
   does the same from a shell (`--src` is required, and checked the same
   way); the lease belongs to that shell, or to `--holder <pid>`.
-* The launcher's tests, `tests/test_launcher.py`, start no SketchUp. Run
-  them from the checkout being tested, with its `src` first on the path:
-  `$env:PYTHONPATH = "$PWD\src"; python -m unittest discover -s tests`.
+* The tests (`tests/`) start no SketchUp. Run them from the checkout being
+  tested with `uv run pytest`, which puts its `src` first on the path.
 
 The state is `%LOCALAPPDATA%\sketchup-mcp\pool.json`, under a lock file.
 SketchUp is started by a scheduled task per instance ("SketchUp pool
