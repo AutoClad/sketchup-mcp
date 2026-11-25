@@ -1,6 +1,7 @@
 import json
 from dataclasses import dataclass
 
+
 @dataclass
 class MockContext:
     request_id: int = 1

@@ -11,6 +11,7 @@ checkout's):
 
 import json
 import shutil
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -62,7 +63,7 @@ class PoolTest(unittest.TestCase):
         """Writes pool.json: one dict per instance, in port order, with its
         pid (running if given), src, lease and last_lease."""
         records = [launcher._blank(port) for port in launcher.PORTS]
-        for r, spec in zip(records, instances):
+        for r, spec in zip(records, instances, strict=False):
             if spec.get("pid"):
                 r.update(pid=spec["pid"], started=float(spec["pid"]), ready=True,
                          env={"SHELLIFY_SRC": spec.get("src", self.a)})
@@ -306,6 +307,7 @@ class SharedServerTest(unittest.TestCase):
         # A loop in the table (pids reused) ends.
         self.assertIsNone(launcher.shared_server(1, {1: (2, "python.exe"), 2: (1, "python.exe")}, lambda pid: APP))
 
+    @unittest.skipUnless(sys.platform == "win32", "reads Windows' process table")
     def test_this_process_is_found(self):
         # Run from a shell or a session's Claude Code, never the app itself.
         self.assertIsNone(launcher.shared_server())

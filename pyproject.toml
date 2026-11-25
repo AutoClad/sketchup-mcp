@@ -28,6 +28,51 @@ sketchup-launcher = "sketchup_mcp.launcher:main"
 [project.entry-points.mcp]
 sketchup = "sketchup_mcp.server:mcp"
 
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.8",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "."]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+src = ["src", "tests"]
+
+[tool.ruff.format]
+# Written before the formatter was in use, and left as they are so that
+# branches in flight don't conflict. To bring one in: delete its line and run
+# `uvx ruff format <file>`. A new file is checked from the start.
+exclude = [
+    "examples/*.py",
+    "src/sketchup_mcp/launcher.py",
+    "src/sketchup_mcp/server.py",
+    "test_eval_ruby.py",
+    "tests/test_launcher.py",
+]
+
+[tool.ruff.lint]
+# Defaults (pyflakes + pycodestyle errors) plus import sorting and a few
+# bug-catchers. The inherited upstream code is loose; tighten over time.
+select = ["E", "F", "I", "B", "UP"]
+ignore = [
+    "E722",  # bare except: used throughout upstream; fix as files are touched
+    "B904",  # raise without from inside except: same
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Scripts that need a live SketchUp; not part of the test suite.
+"examples/*" = ["E402"]
+"test_eval_ruby.py" = ["E402"]
+# Long lines from before the limit: the scheduled task's XML, written as one
+# f-string with a line per element, and five log and reply lines in the server.
+"src/sketchup_mcp/launcher.py" = ["E501"]
+"src/sketchup_mcp/server.py" = ["E501"]
+
 [build-system]
 requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"

@@ -8,6 +8,7 @@ to execute Ruby code in SketchUp.
 
 import json
 import logging
+
 from mcp.client import Client
 
 # Configure logging

@@ -8,6 +8,7 @@ a complex arts and crafts style cabinet in SketchUp using Ruby code.
 
 import json
 import logging
+
 from mcp.client import Client
 
 # Configure logging
