@@ -187,18 +187,23 @@ The pool's rules are the same. What differs is in
   each instance's model is in `models/` beside it.
 * SketchUp is `/Applications/SketchUp 2026/SketchUp.app`, unless
   `SKETCHUP_EXE` names the program inside another bundle
-  (`.../SketchUp.app/Contents/MacOS/SketchUp`). Each instance is that
-  program run on its model, with its port and source folder in its
-  environment, detached from the MCP server that started it.
+  (`.../SketchUp.app/Contents/MacOS/SketchUp`). Each instance is started
+  with `open -n -F` on its model, with its port and source folder in its
+  environment, and belongs to no MCP server. Run directly, the program
+  loads no extensions.
+* Each SketchUp comes to the front as it starts, taking the keyboard from
+  whatever you were typing in: started in the background, it loads no
+  extensions either.
 * Ending one asks it to quit and kills it five seconds later if it's still
-  there.
+  there, as it is when it has an unsaved change.
 * Register the server with Claude Code at user scope, as on Windows:
   `claude mcp add --scope user sketchup -- uv --directory <this checkout> run sketchup-mcp`.
 
-This has been run against a stand-in program only (`tests/test_host_macos.py`),
-never a real SketchUp on a Mac. Not yet known there: whether SketchUp opens
-a model named on its command line, what it shows after one was killed, and
-where it keeps autosaves.
+How SketchUp is started was worked out by hand with SketchUp 2026 on one
+Mac (the notes at the top of `host/macos.py` say what was measured). The
+tests run it against a stand-in program only (`tests/test_host_macos.py`).
+Not yet tried: a server the Claude desktop app starts from its own config,
+and a SketchUp killed after its autosave interval.
 
 ### Example Commands
 

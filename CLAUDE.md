@@ -14,7 +14,9 @@ The pool runs on Windows and macOS. `launcher.py` has its rules, which
 are the same on both. What differs (the lock, finding processes, starting
 and ending SketchUp, the paths) is in `src/sketchup_mcp/host/`, one module
 per system with the same names in each; `host/__init__.py` lists them. The
-macOS module has run only against a stand-in program, never a real SketchUp.
+macOS module starts SketchUp with `open -n -F`, never by running its program
+directly and never with `-g` (either way it loads no extensions); its tests
+run against a stand-in program, never a real SketchUp.
 The Ruby extension runs wherever SketchUp does, and a SketchUp started by
 hand listens on 9876, which the MCP server doesn't use.
 
@@ -29,7 +31,8 @@ The tests run on any system, and CI runs them on Linux, Windows and
 macOS. `tests/test_host_windows.py` and `tests/test_host_macos.py` run each
 system's module against the system itself (real processes, the real lock, a
 real program started in SketchUp's place), so each runs only where it can;
-Linux runs the macOS ones. `tests/conftest.py` puts stand-ins in place of
+Linux runs the macOS ones but for those that start a program with `open`.
+`tests/conftest.py` puts stand-ins in place of
 `msvcrt` and `ctypes.WinDLL` off Windows, so that tests of Windows' rules
 can load `host/windows.py` anywhere. The tests of the Ruby server
 (`tests/test_bridge_server.py`) need `ruby` on the path and are skipped

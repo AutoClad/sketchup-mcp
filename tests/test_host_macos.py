@@ -1,7 +1,8 @@
 """The pool's macOS code (sketchup_mcp/host/macos.py) against the system
 itself: real processes, the real lock, and a real program started in
 SketchUp's place, up to a whole lease. Nothing here starts SketchUp. It runs
-on macOS and on Linux, which uses the same code; CI's macOS job runs it."""
+on macOS and, but for what starts a program with macOS's `open`, on Linux,
+which uses the same code; CI's macOS job runs it."""
 
 import json
 import os
@@ -16,22 +17,26 @@ import pytest
 
 pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="the pool's code for macOS")
 
+# For the tests that start the stand-in for SketchUp.
+needs_open = pytest.mark.skipif(sys.platform != "darwin", reason="starts a program with macOS's open")
+
 if sys.platform != "win32":
     from sketchup_mcp import launcher
     from sketchup_mcp.host import macos
     from sketchup_mcp.launcher import PoolError
 
-# Stands in for SketchUp with the extension loaded: started as
-# `<program> <model>`, it writes what it was started with beside the model,
-# then listens on SKETCHUP_MCP_PORT and answers every request with its pid,
-# as the extension answers eval_ruby("Process.pid").
+# Stands in for SketchUp with the extension loaded: the program of an app
+# bundle, started by `open`. It writes what it was started with into the
+# pool's folder (seen-<port>), then listens on SKETCHUP_MCP_PORT and answers
+# every request with its pid, as the extension answers
+# eval_ruby("Process.pid"). The model `open` was given reaches a real app as
+# an event, not as an argument, so this never learns of it.
 FAKE_SKETCHUP = """#!{python}
 import json, os, socket, sys
-model = sys.argv[1]
-with open(model + ".seen.tmp", "w") as f:
-    json.dump({{"pid": os.getpid(), "ppid": os.getppid(), "env": dict(os.environ), "argv": sys.argv[1:],
-               "cwd": os.getcwd()}}, f)
-os.replace(model + ".seen.tmp", model + ".seen")
+seen = os.path.join(os.path.dirname(os.environ["SKETCHUP_MCP_POOL_FILE"]), "seen-" + os.environ["SKETCHUP_MCP_PORT"])
+with open(seen + ".tmp", "w") as f:
+    json.dump({{"pid": os.getpid(), "ppid": os.getppid(), "env": dict(os.environ), "argv": sys.argv[1:]}}, f)
+os.replace(seen + ".tmp", seen)
 server = socket.create_server(("127.0.0.1", int(os.environ["SKETCHUP_MCP_PORT"])))
 while True:
     conn, _ = server.accept()
@@ -41,7 +46,19 @@ while True:
         conn.sendall(json.dumps(reply).encode() + b"\\n")
 """
 
-# Ignores a request to quit, as SketchUp sometimes does.
+# What makes the bundle an app to `open`. LSUIElement keeps it out of the
+# Dock and from taking the front.
+INFO_PLIST = """<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict>
+<key>CFBundleExecutable</key><string>SketchUp</string>
+<key>CFBundleIdentifier</key><string>test.sketchup-mcp.stand-in</string>
+<key>CFBundleName</key><string>Fake SketchUp</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+<key>LSUIElement</key><true/>
+</dict></plist>
+"""
+
+# Ignores a request to quit, as SketchUp does with an unsaved change.
 STUBBORN = (
     "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); print('ready', flush=True); time.sleep(120)"
 )
@@ -77,6 +94,7 @@ def fake_app(tmp_path):
     """A program to start in SketchUp's place, laid out as an app bundle."""
     program = tmp_path / "Fake SketchUp.app" / "Contents" / "MacOS" / "SketchUp"
     program.parent.mkdir(parents=True)
+    (program.parent.parent / "Info.plist").write_text(INFO_PLIST)
     program.write_text(FAKE_SKETCHUP.format(python=sys.executable))
     program.chmod(program.stat().st_mode | stat.S_IXUSR)
     return program
@@ -102,6 +120,10 @@ def pool(tmp_path, fake_app, monkeypatch):
     for record in launcher._load():
         if launcher.is_running(record["pid"], record["started"]):
             os.kill(record["pid"], 9)
+    # And any the pool has no record of.
+    for port in launcher.PORTS:
+        for pid in macos._instances(fake_app, port):
+            os.kill(pid, 9)
 
 
 def source(tmp_path, name):
@@ -113,7 +135,7 @@ def source(tmp_path, name):
 
 def seen_by(record):
     """What the fake SketchUp of a pool record was started with."""
-    path = Path(record["model"] + ".seen")
+    path = launcher.POOL_DIR / f"seen-{record['port']}"
     assert wait_for(path.exists), "the program never ran"
     return json.loads(path.read_text())
 
@@ -301,33 +323,46 @@ def test_killing_a_process_that_has_gone_does_nothing(sleeper):
 # --- Starting SketchUp -------------------------------------------------------
 
 
-def test_start_runs_the_program_on_a_copy_of_the_template_with_its_port_and_source(pool, monkeypatch):
+@needs_open
+def test_start_opens_the_app_on_a_copy_of_the_template_with_its_port_and_source(pool, fake_app, monkeypatch):
     # Set for this process, as in a server started from a pool instance: not passed on.
     monkeypatch.setenv("SKETCHUP_MCP_PORT", "1")
     monkeypatch.setenv("SKETCHUP_MCP_BIND", "0.0.0.0")
     monkeypatch.setenv("SHELLIFY_SRC", "/somewhere/else")
-    monkeypatch.setenv("SOMETHING_OF_THE_USERS", "kept")
     record = launcher._blank(launcher.PORTS[0])
     stale = [Path(record["model"]).with_name("AutoSave_pool-sketchup-1.skp"), Path(record["model"]).with_suffix(".skb")]
     Path(record["model"]).parent.mkdir(parents=True)
     for path in stale:
         path.write_text("left by the last one")
+    commands = []
+    run = subprocess.run
 
-    pid, started = launcher._launch(record, "/work/tree")
+    def recording(command, **kwargs):
+        if command[0] == "open":
+            commands.append(command)
+        return run(command, **kwargs)
+
+    monkeypatch.setattr(macos.subprocess, "run", recording)
+
+    pid, started = launcher._launch(record, "/work/a tree")
     record.update(pid=pid, started=started)
     launcher._save([record])
 
     seen = seen_by(record)
     assert seen["pid"] == pid
     assert launcher.is_running(pid, started)
-    assert seen["argv"] == [record["model"]]
+    # A new SketchUp, without the windows of the last one, on the model, and
+    # not in the background (-g), where SketchUp loads no extensions.
+    (command,) = commands
+    assert command[:5] == ["open", "-n", "-F", "-a", str(fake_app.parent.parent.parent)]
+    assert command[-1] == record["model"]
+    assert "-g" not in command
     assert Path(record["model"]).read_bytes() == b"an empty model"
     assert not any(path.exists() for path in stale)
     assert seen["env"]["SKETCHUP_MCP_PORT"] == str(launcher.PORTS[0])
-    assert seen["env"]["SHELLIFY_SRC"] == "/work/tree"
+    assert seen["env"]["SHELLIFY_SRC"] == "/work/a tree"
     assert seen["env"]["SKETCHUP_MCP_POOL_FILE"] == str(launcher.POOL_FILE)
     assert "SKETCHUP_MCP_BIND" not in seen["env"]
-    assert seen["env"]["SOMETHING_OF_THE_USERS"] == "kept"
     # It belongs to no MCP server: not this process's child, so it outlives
     # it, and leaves no zombie here when it ends.
     assert seen["ppid"] != os.getpid()
@@ -337,10 +372,81 @@ def test_start_runs_the_program_on_a_copy_of_the_template_with_its_port_and_sour
     assert not launcher.is_running(pid, started)
 
 
+def test_an_instance_is_found_by_its_program_and_the_port_in_its_environment(tmp_path):
+    program = tmp_path / "Some.app" / "Contents" / "MacOS" / "SketchUp"
+    program.parent.mkdir(parents=True)
+    program.write_text(f"#!{sys.executable}\nimport time\ntime.sleep(120)\n")
+    program.chmod(0o755)
+    port, other = free_ports(2)
+
+    def run(command, port):
+        return subprocess.Popen(command, env={**os.environ, "SKETCHUP_MCP_PORT": str(port)})
+
+    started = [
+        run([str(program), "a model.skp"], port),
+        # The same program for another port, and another program that has
+        # the port in its environment, and both in its arguments.
+        run([str(program)], other),
+        run([sys.executable, "-c", "import time; time.sleep(120)", str(program), f"SKETCHUP_MCP_PORT={port}"], port),
+    ]
+    try:
+        assert wait_for(lambda: macos._instances(program, port) == [started[0].pid]), macos._instances(program, port)
+        assert macos._instances(program, other) == [started[1].pid]
+        assert macos._instances(program, free_ports(1)[0]) == []
+    finally:
+        for proc in started:
+            proc.kill()
+            proc.wait()
+
+
+@needs_open
+def test_a_sketchup_the_pool_has_no_record_of_is_ended_before_another_starts_on_its_port(pool):
+    # As when the process that started it ended before writing it down.
+    record = launcher._blank(launcher.PORTS[0])
+    lost, lost_started = launcher._launch(record, "/work/tree")
+    seen_by(record)
+    (launcher.POOL_DIR / f"seen-{record['port']}").unlink()
+    # It listens, so the launcher itself would refuse the port: straight to start.
+    pid, started = macos.start(record, "/work/tree", launcher.SKETCHUP_EXE, launcher.TEMPLATE, pool, launcher.POOL_FILE)
+    record.update(pid=pid, started=started)
+    launcher._save([record])
+
+    assert pid != lost
+    assert not launcher.is_running(lost, lost_started)
+    assert seen_by(record)["pid"] == pid
+
+
+@needs_open
 def test_a_program_that_cant_be_run_is_reported(pool, fake_app):
     fake_app.chmod(0o644)
 
+    with pytest.raises(PoolError, match="Starting SketchUp failed: open said: .+"):
+        launcher._launch(launcher._blank(launcher.PORTS[0]), "/work/tree")
+
+
+@needs_open
+def test_a_program_that_exits_straight_away_is_reported(pool, fake_app, monkeypatch):
+    fake_app.write_text("#!/bin/sh\nexit 3\n")
+    monkeypatch.setattr(macos, "FIND_WAIT", 1.0)
+
     with pytest.raises(PoolError, match="exited straight away"):
+        launcher._launch(launcher._blank(launcher.PORTS[0]), "/work/tree")
+
+
+def test_a_program_outside_an_app_bundle_is_refused(pool, tmp_path, monkeypatch):
+    program = tmp_path / "SketchUp"
+    program.write_text("#!/bin/sh\n")
+    monkeypatch.setattr(launcher, "SKETCHUP_EXE", program)
+    monkeypatch.setattr(macos.sys, "platform", "darwin")
+
+    with pytest.raises(PoolError, match="isn't inside an app bundle"):
+        launcher._launch(launcher._blank(launcher.PORTS[0]), "/work/tree")
+
+
+def test_nothing_is_started_where_there_is_no_sketchup(pool, monkeypatch):
+    monkeypatch.setattr(macos.sys, "platform", "linux")
+
+    with pytest.raises(PoolError, match="no SketchUp to start on this system"):
         launcher._launch(launcher._blank(launcher.PORTS[0]), "/work/tree")
 
 
@@ -354,6 +460,7 @@ def test_a_missing_program_is_reported_before_anything_starts(pool, fake_app):
 # --- A whole lease -----------------------------------------------------------
 
 
+@needs_open
 def test_a_lease_starts_sketchup_keeps_it_for_the_next_and_restarts_it_for_another_source(pool, tmp_path):
     a, b = source(tmp_path, "a"), source(tmp_path, "b")
     me = launcher.holder()
@@ -383,6 +490,7 @@ def test_a_lease_starts_sketchup_keeps_it_for_the_next_and_restarts_it_for_anoth
     assert launcher.is_running(first["pid"], first["started"])
 
 
+@needs_open
 def test_a_leased_sketchup_that_died_is_seen_and_replaced(pool, tmp_path):
     a = source(tmp_path, "a")
     me = launcher.holder()
@@ -397,6 +505,7 @@ def test_a_leased_sketchup_that_died_is_seen_and_replaced(pool, tmp_path):
     assert launcher.is_running(second["pid"], second["started"])
 
 
+@needs_open
 def test_a_sketchup_that_never_listens_fails_the_lease_and_frees_it(pool, tmp_path, fake_app, monkeypatch):
     # As when SketchUp stops at a dialog before its extensions load.
     fake_app.write_text(f"#!{sys.executable}\nimport time\ntime.sleep(120)\n")
@@ -408,9 +517,32 @@ def test_a_sketchup_that_never_listens_fails_the_lease_and_frees_it(pool, tmp_pa
 
     record = launcher.status()[0]
     assert record["lease"] is None
-    assert record["alive"] is True  # left running; the next lease restarts it
+    assert record["alive"] is True  # left running, for whoever looks at what stopped it
 
 
+@needs_open
+def test_after_a_sketchup_that_never_listened_the_next_lease_ends_it_and_starts_another(
+    pool, tmp_path, fake_app, monkeypatch
+):
+    good = fake_app.read_text()
+    fake_app.write_text(f"#!{sys.executable}\nimport time\ntime.sleep(120)\n")
+    monkeypatch.setattr(launcher, "START_TIMEOUT", 2.0)
+    monkeypatch.setattr(launcher, "PORTS", launcher.PORTS[:1])
+    a, me = source(tmp_path, "a"), launcher.holder()
+    with pytest.raises(PoolError, match="didn't answer on port"):
+        launcher.lease(a, me)
+    stuck = launcher.status()[0]
+
+    fake_app.write_text(good)
+    monkeypatch.setattr(launcher, "START_TIMEOUT", 30.0)
+    after = launcher.lease(a, me)
+
+    assert after["fresh"] is True and after["name"] == "sketchup-1"
+    assert not launcher.is_running(stuck["pid"], stuck["started"])
+    assert launcher.ask_pid(after["port"]) == after["pid"]
+
+
+@needs_open
 def test_a_lease_whose_holder_has_gone_is_freed(pool, tmp_path):
     a = source(tmp_path, "a")
     holder = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
