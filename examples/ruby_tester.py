@@ -7,6 +7,7 @@ This script tests Ruby code in smaller chunks to identify compatibility issues w
 
 import json
 import logging
+
 from mcp.client import Client
 
 # Configure logging

@@ -1,0 +1,13 @@
+name: CI
+on:
+  push:
+    branches: [yolo, main]
+  pull_request:
+jobs:
+  ci:
+    # The shared workflow at a fixed commit (AutoClad/.github as of 2026-11-25),
+    # so a push there can't change this repository's checks. Moving to a newer
+    # commit is a pull request here, where the new workflow runs as its checks.
+    uses: AutoClad/.github/.github/workflows/python-ci.yml@d76409eba862b7b9805edf4fd9c4ad295f2f127f
+    with:
+      python-version: '3.10'

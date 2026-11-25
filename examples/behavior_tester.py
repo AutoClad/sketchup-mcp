@@ -7,6 +7,7 @@ This script specifically tests the component behavior methods in SketchUp 25.0.5
 
 import json
 import logging
+
 from mcp.client import Client
 
 # Configure logging

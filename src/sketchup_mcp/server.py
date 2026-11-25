@@ -1,13 +1,15 @@
-from mcp.server.fastmcp import FastMCP, Context
-import socket
-import json
 import asyncio
+import json
 import logging
 import os
+import socket
 import threading
-from dataclasses import dataclass, field
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import AsyncIterator, Dict, Any, List
+from dataclasses import dataclass, field
+from typing import Any
+
+from mcp.server.fastmcp import Context, FastMCP
 
 from . import launcher
 
@@ -192,11 +194,11 @@ class SketchupConnection:
     def send_command(
         self,
         method: str,
-        params: Dict[str, Any] = None,
+        params: dict[str, Any] = None,
         request_id: Any = None,
         timeout: float = 15.0,
         retries: int = 2
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Send a JSON-RPC request to Sketchup and return the response
 
         timeout/retries are per call: eval_ruby can run for a long time and
@@ -273,18 +275,18 @@ class SketchupConnection:
 
                 return response.get("result", {})
                 
-            except (socket.timeout, ConnectionError, BrokenPipeError, ConnectionResetError) as e:
+            except (TimeoutError, ConnectionError, BrokenPipeError, ConnectionResetError) as e:
                 logger.warning(f"Connection error (attempt {retry_count+1}/{max_retries+1}): {str(e)}")
                 retry_count += 1
                 
                 if retry_count <= max_retries:
-                    logger.info(f"Retrying connection...")
+                    logger.info("Retrying connection...")
                     self.disconnect()
                     if not self.connect():
                         logger.error("Failed to reconnect")
                         break
                 else:
-                    logger.error(f"Max retries reached, giving up")
+                    logger.error("Max retries reached, giving up")
                     self.disconnect()
                     if isinstance(e, socket.timeout):
                         raise Exception(
@@ -311,7 +313,7 @@ class SketchupConnection:
 
 # One connection per SketchUp, by (host, port). A session has one lease at a
 # time, but keeps the connection to an instance it leased before.
-_connections: Dict[tuple, SketchupConnection] = {}
+_connections: dict[tuple, SketchupConnection] = {}
 _connections_lock = threading.Lock()
 _holder = None
 
@@ -389,7 +391,7 @@ def get_sketchup_connection() -> SketchupConnection:
         return _connections[key]
 
 @asynccontextmanager
-async def server_lifespan(server: FastMCP) -> AsyncIterator[Dict[str, Any]]:
+async def server_lifespan(server: FastMCP) -> AsyncIterator[dict[str, Any]]:
     """Manage server startup and shutdown lifecycle"""
     try:
         logger.info("SketchupMCP server starting up")
@@ -437,8 +439,8 @@ mcp = FastMCP(
 def create_component(
     ctx: Context,
     type: str = "cube",
-    position: List[float] = None,
-    dimensions: List[float] = None
+    position: list[float] = None,
+    dimensions: list[float] = None
 ) -> str:
     """Create a new component in Sketchup"""
     try:
@@ -493,9 +495,9 @@ def delete_component(
 def transform_component(
     ctx: Context,
     id: str,
-    position: List[float] = None,
-    rotation: List[float] = None,
-    scale: List[float] = None
+    position: list[float] = None,
+    rotation: list[float] = None,
+    scale: list[float] = None
 ) -> str:
     """Transform a component's position, rotation, or scale"""
     try:
@@ -796,7 +798,7 @@ async def server_status(ctx: Context) -> str:
     get a 'busy' error)."""
     return await asyncio.to_thread(_server_status, ctx.request_id)
 
-def _lease_reply(record: Dict[str, Any]) -> Dict[str, Any]:
+def _lease_reply(record: dict[str, Any]) -> dict[str, Any]:
     return {
         "success": True,
         "name": record["name"],

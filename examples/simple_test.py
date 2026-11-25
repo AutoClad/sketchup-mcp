@@ -7,6 +7,7 @@ This is a minimal test to verify that the eval_ruby feature works correctly.
 
 import json
 import logging
+
 from mcp.client import Client
 
 # Configure logging
